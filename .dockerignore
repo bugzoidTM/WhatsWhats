@@ -1,0 +1,30 @@
+# Dependências locais (instaladas no container)
+node_modules/
+
+# Cache do Puppeteer/WhatsApp
+.wwebjs_cache/
+test-auth/
+
+# Dados de instâncias e sessões (persistidos via volume Docker)
+instances/
+auth.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# Arquivos de desenvolvimento
+.env.local
+.env.development
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+.git/
+.gitignore

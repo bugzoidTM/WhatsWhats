@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login — Agente IA WhatsApp | Nutef</title>
+  <meta name="description" content="Acesso seguro ao painel de controle do Agente IA WhatsApp - Nutef Soluções Digitais.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-1: #080d0e;
+      --bg-2: #0e1815;
+      --card: rgba(255,255,255,0.05);
+      --card-border: rgba(16,185,129,0.18);
+      --accent: #10b981;
+      --accent-light: #34d399;
+      --accent-glow: rgba(16,185,129,0.28);
+      --green: #22c55e;
+      --red: #ef4444;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --radius: 18px;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-1);
+      min-height: 100vh;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    body::before {
+      content: "";
+      position: fixed; inset: 0; z-index: -1;
+      background:
+        radial-gradient(ellipse 70% 60% at 15% 10%, rgba(16,185,129,0.14) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 85% 90%, rgba(5,150,105,0.09) 0%, transparent 50%),
+        var(--bg-1);
+    }
+
+    /* Subtle animated orb */
+    body::after {
+      content: "";
+      position: fixed;
+      width: 400px; height: 400px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(16,185,129,0.06) 0%, transparent 70%);
+      top: -100px; left: -100px;
+      animation: float 8s ease-in-out infinite;
+      z-index: -1;
+    }
+
+    @keyframes float {
+      0%, 100% { transform: translateY(0) scale(1); }
+      50% { transform: translateY(30px) scale(1.05); }
+    }
+
+    .login-card {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-top: 2px solid rgba(16,185,129,0.45);
+      border-radius: var(--radius);
+      padding: 42px 38px 38px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow:
+        0 24px 64px rgba(0,0,0,0.55),
+        0 0 40px rgba(16,185,129,0.04),
+        inset 0 1px 0 rgba(255,255,255,0.06);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      animation: slideUp 0.4s cubic-bezier(0.16,1,0.3,1);
+    }
+
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(24px); }
+      to   { opacity: 1; transform: none; }
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 34px;
+    }
+
+    .brand-icon {
+      width: 52px; height: 52px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.55rem; flex-shrink: 0;
+      box-shadow: 0 0 28px var(--accent-glow), 0 4px 16px rgba(0,0,0,0.4);
+    }
+
+    .brand-text h1 { font-size: 1.2rem; font-weight: 800; letter-spacing: -0.02em; }
+    .brand-text p  { font-size: 0.78rem; color: var(--text-muted); margin-top: 3px; }
+
+    .lock-icon {
+      text-align: center;
+      font-size: 2.2rem;
+      margin-bottom: 10px;
+      opacity: 0.45;
+    }
+
+    .form-title {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin-bottom: 5px;
+    }
+
+    .form-subtitle {
+      font-size: 0.83rem;
+      color: var(--text-muted);
+      margin-bottom: 26px;
+      line-height: 1.55;
+    }
+
+    .form-group { margin-bottom: 16px; }
+
+    .form-group label {
+      display: block;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      font-weight: 500;
+      margin-bottom: 7px;
+    }
+
+    .input-wrap { position: relative; }
+
+    .form-group input {
+      width: 100%;
+      padding: 12px 44px 12px 14px;
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 11px;
+      color: var(--text);
+      font-size: 0.95rem;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .form-group input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    .form-group input::placeholder { color: #4b5563; }
+
+    .toggle-pw {
+      position: absolute;
+      right: 12px; top: 50%;
+      transform: translateY(-50%);
+      background: none; border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 4px;
+      font-size: 1.1rem;
+      line-height: 1;
+      transition: color 0.15s;
+    }
+    .toggle-pw:hover { color: var(--accent-light); }
+
+    .btn-login {
+      width: 100%;
+      padding: 13px;
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      color: #fff;
+      border: none;
+      border-radius: 11px;
+      font-family: inherit;
+      font-size: 0.96rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: box-shadow 0.2s, transform 0.12s, opacity 0.2s;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      margin-top: 6px;
+      letter-spacing: 0.01em;
+    }
+    .btn-login:hover { box-shadow: 0 0 24px var(--accent-glow); opacity: 0.93; }
+    .btn-login:active { transform: scale(0.98); }
+    .btn-login:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+    .error-msg {
+      display: none;
+      background: rgba(239,68,68,0.1);
+      border: 1px solid rgba(239,68,68,0.25);
+      border-radius: 9px;
+      padding: 10px 14px;
+      font-size: 0.85rem;
+      color: var(--red);
+      margin-top: 14px;
+      text-align: center;
+      animation: shake 0.35s ease;
+    }
+    .error-msg.show { display: block; }
+
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      20%, 60%  { transform: translateX(-6px); }
+      40%, 80%  { transform: translateX(6px); }
+    }
+
+    footer {
+      text-align: center;
+      margin-top: 22px;
+      font-size: 0.74rem;
+      color: var(--text-muted);
+    }
+    footer a { color: var(--accent-light); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div>
+    <div class="login-card">
+      <div class="brand">
+        <div class="brand-icon">🤖</div>
+        <div class="brand-text">
+          <h1>Agente IA WhatsApp</h1>
+          <p>Nutef - Painel de Controle</p>
+        </div>
+      </div>
+
+      <div class="lock-icon">🔐</div>
+      <div class="form-title">Acesso restrito</div>
+      <div class="form-subtitle">Digite sua senha para acessar o painel de gerenciamento.</div>
+
+      <form id="login-form" autocomplete="off">
+        <div class="form-group">
+          <label for="password">Senha</label>
+          <div class="input-wrap">
+            <input
+              type="password"
+              id="password"
+              placeholder="Digite sua senha"
+              autocomplete="current-password"
+              required
+            >
+            <button type="button" class="toggle-pw" id="toggle-pw" title="Mostrar/ocultar senha">👁</button>
+          </div>
+        </div>
+
+        <button type="submit" class="btn-login" id="btn-login">
+          <span id="btn-text">🔓 Entrar</span>
+        </button>
+
+        <div class="error-msg" id="error-msg">Senha incorreta. Tente novamente.</div>
+      </form>
+    </div>
+
+    <footer>
+      Sistema proprietário &copy; <a href="https://nutef.com.br" target="_blank">Nutef - Soluções Digitais</a>
+    </footer>
+  </div>
+
+  <script>
+    const form     = document.getElementById('login-form');
+    const btnLogin = document.getElementById('btn-login');
+    const btnText  = document.getElementById('btn-text');
+    const errorMsg = document.getElementById('error-msg');
+    const pwInput  = document.getElementById('password');
+    const togglePw = document.getElementById('toggle-pw');
+
+    // Mostrar/ocultar senha
+    togglePw.addEventListener('click', () => {
+      if (pwInput.type === 'password') {
+        pwInput.type = 'text';
+        togglePw.textContent = '🙈';
+      } else {
+        pwInput.type = 'password';
+        togglePw.textContent = '👁';
+      }
+      pwInput.focus();
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorMsg.classList.remove('show');
+      btnLogin.disabled = true;
+      btnText.textContent = '⏳ Verificando...';
+
+      try {
+        const r = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pwInput.value }),
+        });
+        const d = await r.json();
+        if (r.ok && d.ok) {
+          btnText.textContent = '✅ Entrando...';
+          window.location.href = '/';
+        } else {
+          errorMsg.textContent = d.error || 'Senha incorreta. Tente novamente.';
+          errorMsg.classList.add('show');
+          pwInput.value = '';
+          pwInput.focus();
+        }
+      } catch (err) {
+        errorMsg.textContent = 'Erro de rede. Verifique a conexão.';
+        errorMsg.classList.add('show');
+      } finally {
+        btnLogin.disabled = false;
+        if (btnText.textContent === '⏳ Verificando...') btnText.textContent = '🔓 Entrar';
+      }
+    });
+
+    // Foco automático
+    pwInput.focus();
+  </script>
+</body>
+</html>

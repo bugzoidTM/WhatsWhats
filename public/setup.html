@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Configurar Acesso — Agente IA WhatsApp</title>
+  <meta name="description" content="Configure sua senha de acesso ao painel do Agente IA WhatsApp.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-1: #080d0e;
+      --bg-2: #0e1815;
+      --card: rgba(255,255,255,0.06);
+      --card-border: rgba(255,255,255,0.08);
+      --accent: #10b981;
+      --accent-light: #34d399;
+      --accent-glow: rgba(16,185,129,0.25);
+      --green: #22c55e;
+      --green-glow: rgba(34,197,94,0.2);
+      --red: #ef4444;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --radius: 16px;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-1);
+      min-height: 100vh;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    body::before {
+      content: "";
+      position: fixed; inset: 0; z-index: -1;
+      background:
+        radial-gradient(ellipse 70% 60% at 20% 10%, rgba(16,185,129,0.15) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 80% 90%, rgba(5,150,105,0.10) 0%, transparent 50%),
+        var(--bg-1);
+    }
+
+    .setup-card {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-top: 2px solid rgba(16,185,129,0.4);
+      border-radius: var(--radius);
+      padding: 40px 36px 36px;
+      width: 100%;
+      max-width: 440px;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.5), 0 0 40px rgba(16,185,129,0.05);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      animation: slideUp 0.35s cubic-bezier(0.16,1,0.3,1);
+    }
+
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to   { opacity: 1; transform: none; }
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 28px;
+    }
+
+    .brand-icon {
+      width: 50px; height: 50px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #10b981, #059669);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.5rem; flex-shrink: 0;
+      box-shadow: 0 0 24px var(--accent-glow);
+    }
+
+    .brand-text h1 { font-size: 1.2rem; font-weight: 700; }
+    .brand-text p  { font-size: 0.8rem; color: var(--text-muted); margin-top: 3px; }
+
+    .step-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(16,185,129,0.12);
+      border: 1px solid rgba(16,185,129,0.25);
+      border-radius: 100px;
+      padding: 4px 14px;
+      font-size: 0.78rem;
+      color: var(--accent-light);
+      font-weight: 600;
+      margin-bottom: 16px;
+    }
+
+    .form-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .form-subtitle {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 24px;
+      line-height: 1.6;
+    }
+
+    .form-group { margin-bottom: 14px; }
+
+    .form-group label {
+      display: block;
+      font-size: 0.83rem;
+      color: var(--text-muted);
+      font-weight: 500;
+      margin-bottom: 7px;
+    }
+
+    .input-wrap { position: relative; }
+
+    .form-group input {
+      width: 100%;
+      padding: 11px 44px 11px 14px;
+      background: rgba(0,0,0,0.35);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      color: var(--text);
+      font-size: 0.95rem;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .form-group input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    .form-group input.valid {
+      border-color: var(--green);
+      box-shadow: 0 0 0 3px var(--green-glow);
+    }
+
+    .form-group input::placeholder { color: #64748b; }
+
+    .toggle-pw {
+      position: absolute;
+      right: 12px; top: 50%;
+      transform: translateY(-50%);
+      background: none; border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 4px;
+      font-size: 1.1rem;
+      line-height: 1;
+      transition: color 0.15s;
+    }
+    .toggle-pw:hover { color: var(--text); }
+
+    /* Indicador de força de senha */
+    .strength-bar {
+      height: 3px;
+      border-radius: 2px;
+      background: rgba(255,255,255,0.08);
+      margin-top: 8px;
+      overflow: hidden;
+    }
+    .strength-fill {
+      height: 100%;
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.3s, background 0.3s;
+    }
+    .strength-text {
+      font-size: 0.75rem;
+      margin-top: 5px;
+      color: var(--text-muted);
+      min-height: 16px;
+    }
+
+    .match-msg {
+      font-size: 0.75rem;
+      margin-top: 5px;
+      min-height: 16px;
+    }
+    .match-msg.ok  { color: var(--green); }
+    .match-msg.err { color: var(--red); }
+
+    .btn-setup {
+      width: 100%;
+      padding: 12px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-family: inherit;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: box-shadow 0.2s, transform 0.12s, opacity 0.2s;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      margin-top: 6px;
+    }
+    .btn-setup:hover { box-shadow: 0 0 20px var(--accent-glow); }
+    .btn-setup:active { transform: scale(0.98); }
+    .btn-setup:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .error-msg {
+      display: none;
+      background: rgba(239,68,68,0.1);
+      border: 1px solid rgba(239,68,68,0.25);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.85rem;
+      color: var(--red);
+      margin-top: 14px;
+      text-align: center;
+      animation: shake 0.35s ease;
+    }
+    .error-msg.show { display: block; }
+
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      20%, 60%  { transform: translateX(-6px); }
+      40%, 80%  { transform: translateX(6px); }
+    }
+
+    .success-box {
+      display: none;
+      text-align: center;
+      padding: 24px;
+    }
+    .success-box .icon { font-size: 3rem; margin-bottom: 12px; }
+    .success-box p { color: var(--text-muted); font-size: 0.9rem; }
+
+    footer {
+      text-align: center;
+      margin-top: 22px;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+    footer a { color: var(--accent-light); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div>
+    <div class="setup-card">
+      <div class="brand">
+        <div class="brand-icon">🤖</div>
+        <div class="brand-text">
+          <h1>Agente IA WhatsApp</h1>
+          <p>Nutef - Configuração Inicial</p>
+        </div>
+      </div>
+
+      <div id="form-section">
+        <div class="step-badge">⚙️ Primeiro acesso</div>
+        <div class="form-title">Crie sua senha de acesso</div>
+        <div class="form-subtitle">
+          Defina uma senha para proteger o painel de gerenciamento. Você poderá alterá-la a qualquer momento dentro do sistema.
+        </div>
+
+        <form id="setup-form" autocomplete="off">
+          <div class="form-group">
+            <label for="password">Nova senha</label>
+            <div class="input-wrap">
+              <input
+                type="password"
+                id="password"
+                placeholder="Mínimo 6 caracteres"
+                autocomplete="new-password"
+                required
+              >
+              <button type="button" class="toggle-pw" data-target="password">👁</button>
+            </div>
+            <div class="strength-bar"><div class="strength-fill" id="strength-fill"></div></div>
+            <div class="strength-text" id="strength-text"></div>
+          </div>
+
+          <div class="form-group">
+            <label for="confirm">Confirmar senha</label>
+            <div class="input-wrap">
+              <input
+                type="password"
+                id="confirm"
+                placeholder="Repita a senha"
+                autocomplete="new-password"
+                required
+              >
+              <button type="button" class="toggle-pw" data-target="confirm">👁</button>
+            </div>
+            <div class="match-msg" id="match-msg"></div>
+          </div>
+
+          <button type="submit" class="btn-setup" id="btn-setup" disabled>
+            <span id="btn-text">🔐 Criar senha e entrar</span>
+          </button>
+
+          <div class="error-msg" id="error-msg"></div>
+        </form>
+      </div>
+
+      <div class="success-box" id="success-box">
+        <div class="icon">✅</div>
+        <p>Senha criada! Redirecionando para o painel...</p>
+      </div>
+    </div>
+
+    <footer>
+      Sistema proprietário &copy; <a href="https://nutef.com.br" target="_blank">Nutef - Soluções Digitais</a>
+    </footer>
+  </div>
+
+  <script>
+    const pwInput  = document.getElementById('password');
+    const cfInput  = document.getElementById('confirm');
+    const btnSetup = document.getElementById('btn-setup');
+    const btnText  = document.getElementById('btn-text');
+    const errorMsg = document.getElementById('error-msg');
+    const matchMsg = document.getElementById('match-msg');
+    const fillEl   = document.getElementById('strength-fill');
+    const textEl   = document.getElementById('strength-text');
+
+    // Toggle mostrar/ocultar senha
+    document.querySelectorAll('.toggle-pw').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const target = document.getElementById(btn.dataset.target);
+        target.type = target.type === 'password' ? 'text' : 'password';
+        btn.textContent = target.type === 'password' ? '👁' : '🙈';
+        target.focus();
+      });
+    });
+
+    // Força da senha
+    function checkStrength(pw) {
+      let score = 0;
+      if (pw.length >= 6)  score++;
+      if (pw.length >= 10) score++;
+      if (/[A-Z]/.test(pw)) score++;
+      if (/[0-9]/.test(pw)) score++;
+      if (/[^A-Za-z0-9]/.test(pw)) score++;
+      return score;
+    }
+
+    const strengthLabels = ['', 'Fraca', 'Razoável', 'Boa', 'Forte', 'Muito forte'];
+    const strengthColors = ['', '#ef4444', '#f59e0b', '#eab308', '#22c55e', '#10b981'];
+
+    pwInput.addEventListener('input', () => {
+      const pw = pwInput.value;
+      const score = pw.length === 0 ? 0 : checkStrength(pw);
+      const pct = pw.length === 0 ? 0 : Math.min(100, (score / 5) * 100);
+      fillEl.style.width = pct + '%';
+      fillEl.style.background = strengthColors[score] || '';
+      textEl.textContent = pw.length === 0 ? '' : `Senha ${strengthLabels[score] || 'fraca'}`;
+      checkMatch();
+      updateBtn();
+    });
+
+    cfInput.addEventListener('input', () => { checkMatch(); updateBtn(); });
+
+    function checkMatch() {
+      const pw = pwInput.value;
+      const cf = cfInput.value;
+      if (!cf) { matchMsg.textContent = ''; matchMsg.className = 'match-msg'; return; }
+      if (pw === cf) {
+        matchMsg.textContent = '✓ Senhas coincidem';
+        matchMsg.className = 'match-msg ok';
+        cfInput.classList.add('valid');
+      } else {
+        matchMsg.textContent = '✗ Senhas não coincidem';
+        matchMsg.className = 'match-msg err';
+        cfInput.classList.remove('valid');
+      }
+    }
+
+    function updateBtn() {
+      const valid = pwInput.value.length >= 6 && pwInput.value === cfInput.value;
+      btnSetup.disabled = !valid;
+    }
+
+    document.getElementById('setup-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorMsg.classList.remove('show');
+      btnSetup.disabled = true;
+      btnText.textContent = '⏳ Salvando...';
+
+      try {
+        const r = await fetch('/api/auth/setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            password: pwInput.value,
+            confirmPassword: cfInput.value,
+          }),
+        });
+        const d = await r.json();
+        if (r.ok && d.ok) {
+          document.getElementById('form-section').style.display = 'none';
+          document.getElementById('success-box').style.display = 'block';
+          setTimeout(() => { window.location.href = '/'; }, 1500);
+        } else {
+          errorMsg.textContent = d.error || 'Erro ao salvar. Tente novamente.';
+          errorMsg.classList.add('show');
+          btnSetup.disabled = false;
+          btnText.textContent = '🔐 Criar senha e entrar';
+        }
+      } catch (err) {
+        errorMsg.textContent = 'Erro de rede. Verifique a conexão.';
+        errorMsg.classList.add('show');
+        btnSetup.disabled = false;
+        btnText.textContent = '🔐 Criar senha e entrar';
+      }
+    });
+
+    // Foco automático
+    pwInput.focus();
+  </script>
+</body>
+</html>

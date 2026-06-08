@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Instância — Agente IA WhatsApp</title>
+  <meta name="description" content="Painel de gerenciamento de instância WhatsApp com IA, fluxos e webhooks.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-1: #080d0e;
+      --bg-2: #0e1815;
+      --card: rgba(255,255,255,0.04);
+      --card-border: rgba(16,185,129,0.12);
+      --accent: #10b981;
+      --accent-light: #34d399;
+      --accent-glow: rgba(16,185,129,0.25);
+      --green: #22c55e;
+      --green-light: rgba(34,197,94,0.1);
+      --red: #ef4444;
+      --red-light: rgba(239,68,68,0.12);
+      --yellow: #f59e0b;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --radius: 14px;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-1);
+      min-height: 100vh; color: var(--text);
+      padding: 20px 16px 48px;
+    }
+    body::before {
+      content: "";
+      position: fixed; inset: 0; z-index: -1;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% 0%, rgba(16,185,129,0.08) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 80% 100%, rgba(52,211,153,0.05) 0%, transparent 50%),
+        var(--bg-1);
+    }
+
+    .wrap { max-width: 860px; margin: 0 auto; }
+
+    /* ── Topbar ── */
+    .topbar {
+      display: flex; align-items: center; gap: 14px; margin-bottom: 24px; flex-wrap: wrap;
+    }
+    .back-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 8px 14px; border-radius: 9px;
+      background: var(--card); border: 1px solid var(--card-border);
+      color: var(--text-muted); font-size: 0.85rem; font-family: inherit;
+      cursor: pointer; text-decoration: none; transition: all 0.18s;
+      backdrop-filter: blur(8px);
+    }
+    .back-btn:hover { color: var(--text); border-color: rgba(16,185,129,0.3); }
+    .topbar-title {
+      font-size: 1.05rem; font-weight: 700; display: flex; align-items: center; gap: 10px;
+    }
+    .topbar-slug { font-size: 0.8rem; color: var(--text-muted); font-family: monospace; }
+
+    .badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 10px; border-radius: 100px; font-size: 0.72rem; font-weight: 600;
+    }
+    .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; }
+    .badge.connected    { background: var(--green-light); color: var(--green); box-shadow: 0 0 12px rgba(34,197,94,0.2); }
+    .badge.connected::before { background: var(--green); box-shadow: 0 0 6px var(--green); animation: blink 1.5s ease-in-out infinite; }
+    .badge.disconnected { background: rgba(100,116,139,0.15); color: var(--text-muted); }
+    .badge.disconnected::before { background: var(--text-muted); }
+    @keyframes blink { 50% { opacity: 0.4; } }
+
+    /* ── QR area ── */
+    #qr-area {
+      text-align: center; min-height: 180px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 12px; padding: 24px;
+    }
+    #qr-area img { max-width: 260px; border-radius: 14px; box-shadow: 0 4px 24px rgba(0,0,0,0.4); }
+    .qr-msg { font-size: 0.95rem; }
+    .qr-msg.ok     { color: var(--green); }
+    .qr-msg.pending{ color: var(--yellow); }
+    @keyframes pulse { 50% { opacity: 0.5; } }
+    .qr-loading { animation: pulse 1.5s ease-in-out infinite; }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--card); border: 1px solid var(--card-border);
+      border-radius: var(--radius); padding: 22px; margin-bottom: 18px;
+      backdrop-filter: blur(8px);
+    }
+    .card h2 { font-size: 1rem; font-weight: 700; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+
+    /* QR card connecting state */
+    .card.connecting {
+      border-left: 3px solid var(--accent);
+    }
+
+    /* ── Dica ── */
+    .dica {
+      background: rgba(16,185,129,0.07); border-left: 3px solid var(--accent);
+      border-radius: 0 10px 10px 0; padding: 11px 15px;
+      margin-bottom: 16px; font-size: 0.87rem; color: var(--text-muted); line-height: 1.5;
+    }
+    .dica strong { color: var(--text); }
+
+    /* ── Forms ── */
+    .form-group { margin-bottom: 14px; }
+    .form-group label { display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-muted); font-weight: 500; }
+    .form-group input, .form-group textarea, .form-group select {
+      width: 100%; padding: 10px 14px;
+      background: rgba(0,0,0,0.3); border: 1px solid var(--card-border);
+      border-radius: 9px; color: var(--text); font-size: 0.92rem; font-family: inherit;
+      outline: none; transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .form-group input:focus, .form-group textarea:focus, .form-group select:focus {
+      border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+    .form-group textarea { min-height: 80px; resize: vertical; }
+    .form-group input::placeholder, .form-group textarea::placeholder { color: #64748b; }
+
+    /* ── Checkbox ── */
+    .checkbox-group { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 0.9rem; }
+    .checkbox-group input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
+
+    /* ── Botões ── */
+    .btn {
+      padding: 10px 18px; border: none; border-radius: 9px;
+      font-family: inherit; font-size: 0.88rem; font-weight: 600;
+      cursor: pointer; transition: opacity 0.18s, transform 0.12s, box-shadow 0.18s;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent) 0%, #059669 100%);
+      color: #fff;
+    }
+    .btn-primary:hover { box-shadow: 0 0 20px var(--accent-glow); opacity: 0.92; }
+    .btn-success { background: #16a34a; color: #fff; }
+    .btn-danger  { background: var(--red-light); color: var(--red); border: 1px solid rgba(239,68,68,0.2); }
+    .btn-danger:hover { background: rgba(239,68,68,0.22); }
+    .btn-yellow  { background: rgba(245,158,11,0.18); color: var(--yellow); border: 1px solid rgba(245,158,11,0.25); }
+    .btn-sm      { padding: 6px 12px; font-size: 0.8rem; border-radius: 7px; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ── Tabs ── */
+    .tab-buttons {
+      display: flex; gap: 6px; margin-bottom: 18px; flex-wrap: wrap;
+    }
+    .tab-btn {
+      padding: 9px 16px; border-radius: 9px;
+      background: var(--card); border: 1px solid var(--card-border);
+      color: var(--text-muted); font-family: inherit; font-size: 0.88rem; font-weight: 500;
+      cursor: pointer; transition: all 0.18s; backdrop-filter: blur(8px);
+    }
+    .tab-btn:hover:not(.active) { border-color: rgba(16,185,129,0.3); color: var(--text); }
+    .tab-btn.active {
+      background: linear-gradient(135deg, var(--accent) 0%, #059669 100%);
+      border-color: var(--accent); color: #fff;
+      box-shadow: 0 0 16px var(--accent-glow);
+    }
+    .tab-content { display: none; }
+    .tab-content.ativo { display: block; }
+
+    /* ── Fluxos ── */
+    .flow-item {
+      background: rgba(0,0,0,0.2); border: 1px solid var(--card-border);
+      border-radius: 10px; padding: 14px; margin-bottom: 10px;
+      animation: fadeIn 0.2s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    .flow-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .flow-header span { font-size: 0.85rem; font-weight: 600; color: var(--text-muted); }
+
+    /* ── Humano atendendo ── */
+    .humano-box {
+      margin-top: 18px; padding: 14px 16px;
+      background: rgba(0,0,0,0.2); border: 1px solid var(--card-border);
+      border-radius: 10px; cursor: pointer; transition: all 0.2s;
+    }
+    .humano-box.ativo {
+      background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.3);
+    }
+    .humano-box label { cursor: pointer; display: flex; align-items: center; gap: 12px; margin: 0; font-size: 0.93rem; }
+
+    /* ── Webhooks ── */
+    .webhook-item {
+      background: rgba(0,0,0,0.2); border: 1px solid var(--card-border);
+      border-radius: 10px; padding: 16px; margin-bottom: 12px;
+      display: flex; flex-direction: column; gap: 12px;
+      animation: fadeIn 0.2s ease;
+    }
+    .webhook-item.disabled-wh { opacity: 0.55; }
+    .webhook-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .webhook-url { font-family: monospace; font-size: 0.82rem; color: var(--accent-light); word-break: break-all; }
+
+    .events-grid {
+      display: flex; flex-wrap: wrap; gap: 7px; margin-top: 6px;
+    }
+    .event-check {
+      display: flex; align-items: center; gap: 5px;
+      background: rgba(255,255,255,0.04); border: 1px solid var(--card-border);
+      border-radius: 6px; padding: 4px 10px; font-size: 0.78rem; cursor: pointer;
+      transition: all 0.15s;
+    }
+    .event-check:hover { border-color: var(--accent-light); }
+    .event-check input { width: 13px; height: 13px; accent-color: var(--accent); }
+    .event-check.checked { background: rgba(16,185,129,0.1); border-color: rgba(16,185,129,0.35); color: var(--accent-light); }
+
+    /* ── Toast ── */
+    #toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+      background: #0e1815; border: 1px solid var(--card-border); border-radius: 10px;
+      padding: 11px 22px; font-size: 0.9rem; color: var(--text);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5); transition: all 0.25s;
+      opacity: 0; pointer-events: none; z-index: 9999; white-space: nowrap;
+      backdrop-filter: blur(8px);
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #toast.ok  { border-color: rgba(16,185,129,0.4); color: var(--accent-light); }
+    #toast.err { border-color: rgba(239,68,68,0.3);  color: var(--red); }
+
+    /* ── Footer ── */
+    footer {
+      margin-top: 32px; text-align: center;
+      font-size: 0.77rem; color: var(--text-muted);
+      border-top: 1px solid var(--card-border); padding-top: 18px;
+    }
+    footer a { color: var(--accent-light); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    @media (max-width: 600px) {
+      .tab-buttons { gap: 4px; }
+      .tab-btn { font-size: 0.8rem; padding: 8px 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <!-- Topbar -->
+    <div class="topbar">
+      <a href="/" class="back-btn">← Dashboard</a>
+      <div>
+        <div class="topbar-title" id="inst-title">🤖 Carregando...</div>
+        <div class="topbar-slug" id="inst-slug"></div>
+      </div>
+      <span class="badge disconnected" id="status-badge">Offline</span>
+      <button id="btn-logout" style="margin-left:auto; padding:7px 14px; border-radius:9px; background:rgba(239,68,68,0.12); color:#ef4444; border:1px solid rgba(239,68,68,0.2); font-family:inherit; font-size:0.82rem; font-weight:600; cursor:pointer;">⏏ Sair</button>
+    </div>
+
+    <!-- QR Code -->
+    <div class="card" id="qr-card">
+      <h2>📲 Conectar WhatsApp</h2>
+      <div id="qr-area">
+        <div class="qr-msg pending qr-loading">⏳ Aguarde 1-2 minutos. O QR Code aparecerá aqui.</div>
+      </div>
+      <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:4px;">
+        <button class="btn btn-primary" id="btnGerarQR">🔄 Gerar QR Code</button>
+        <button class="btn btn-yellow btn-sm" id="btnLimpar">🧹 Limpar sessão e tentar</button>
+        <button class="btn btn-danger btn-sm" id="btnDesconectar" style="display:none;">⏏ Desconectar</button>
+      </div>
+      <div class="humano-box" id="humano-box">
+        <label for="humanoAtendeu">
+          <input type="checkbox" id="humanoAtendeu">
+          <span>👤 <strong>Humano atendendo</strong> — bot e IA param de responder. Marque quando você for falar no WhatsApp.</span>
+        </label>
+      </div>
+      <p style="font-size:0.78rem; color:var(--text-muted); margin-top:10px; text-align:center;">
+        Se o QR não aparecer, use "Limpar sessão e tentar"
+      </p>
+    </div>
+
+    <!-- Abas -->
+    <div class="tab-buttons">
+      <button class="tab-btn active" data-tab="groq">🔑 Groq (IA)</button>
+      <button class="tab-btn" data-tab="fluxos">📋 Fluxos</button>
+      <button class="tab-btn" data-tab="modelo">⚙️ Modelo</button>
+      <button class="tab-btn" data-tab="webhooks">🔗 Webhooks</button>
+      <button class="tab-btn" data-tab="base">📚 Base</button>
+    </div>
+
+    <!-- Aba Groq -->
+    <div id="tab-groq" class="tab-content ativo">
+      <div class="card">
+        <h2>🔑 IA gratuita com Groq</h2>
+        <p class="dica">
+          O bot já responde com os <strong>fluxos</strong> configurados. Adicione a <strong>chave Groq</strong>
+          para a IA responder perguntas que não estão nos fluxos.
+        </p>
+        <a href="https://console.groq.com/keys" target="_blank" class="btn btn-success" style="margin-bottom:16px; text-decoration:none;">
+          🆓 Obter chave GRÁTIS no Groq
+        </a>
+        <p style="font-size:0.82rem; color:var(--text-muted); margin-bottom:14px;">(Cria conta → API Keys → Create API Key → Copiar)</p>
+        <div class="form-group">
+          <label>Chave API (gsk_...)</label>
+          <input type="password" id="groqKey" placeholder="Cole sua chave Groq aqui">
+        </div>
+        <div class="checkbox-group">
+          <input type="checkbox" id="useAI" checked>
+          <label for="useAI">Usar IA quando a pergunta não estiver nos fluxos</label>
+        </div>
+        <button class="btn btn-primary" id="salvarGroq">💾 Salvar</button>
+      </div>
+    </div>
+
+    <!-- Aba Fluxos -->
+    <div id="tab-fluxos" class="tab-content">
+      <div class="card">
+        <h2>📋 Fluxos do Bot</h2>
+        <p class="dica">
+          Quando o cliente digitar uma das <strong>palavras-chave</strong>, o bot responde automaticamente.
+          Separe palavras por vírgula (ex: oi, olá, bom dia).
+        </p>
+        <div id="lista-fluxos"></div>
+        <div style="display:flex; gap:10px; margin-top:12px;">
+          <button class="btn btn-success" id="novoFluxo">+ Adicionar fluxo</button>
+          <button class="btn btn-primary" id="salvarFluxos">💾 Salvar fluxos</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Aba Modelo -->
+    <div id="tab-modelo" class="tab-content">
+      <div class="card">
+        <h2>⚙️ Prompt e Modelo da IA</h2>
+        <p class="dica">
+          Substitua <strong>[SUA EMPRESA]</strong> pelo nome real. A IA usa este texto para saber como responder.
+        </p>
+        <div class="form-group">
+          <label>Instruções para a IA (personalidade do bot)</label>
+          <textarea id="promptSistema" rows="5" placeholder="Ex: Você é o assistente virtual da [SUA EMPRESA]..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>Modelo Groq</label>
+          <select id="modeloGroq">
+            <option value="llama-3.1-8b-instant">Llama 3.1 8B (rápido, gratuito)</option>
+            <option value="llama-3.3-70b-versatile">Llama 3.3 70B (mais inteligente)</option>
+            <option value="llama3-8b-8192">Llama 3 8B</option>
+            <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
+            <option value="gemma2-9b-it">Gemma 2 9B</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" id="salvarModelo">💾 Salvar</button>
+      </div>
+    </div>
+
+    <!-- Aba Webhooks -->
+    <div id="tab-webhooks" class="tab-content">
+      <div class="card">
+        <h2>🔗 Webhooks</h2>
+        <p class="dica">
+          Configure URLs para receber eventos da instância em tempo real. Compatível com o padrão
+          <strong>Evolution API</strong>. Cada evento envia um <code style="background:rgba(0,0,0,0.3);padding:1px 5px;border-radius:4px;">POST</code>
+          com o payload JSON para a URL configurada.
+        </p>
+
+        <div id="lista-webhooks"></div>
+
+        <!-- Formulário novo webhook -->
+        <div class="card" style="background:rgba(0,0,0,0.2); margin-top:12px;">
+          <h2 style="font-size:0.9rem; margin-bottom:12px;">➕ Adicionar Webhook</h2>
+          <div class="form-group">
+            <label>URL de destino</label>
+            <input type="url" id="wh-url" placeholder="https://meu-sistema.com/webhook">
+          </div>
+          <div class="form-group">
+            <label>Token Bearer (opcional)</label>
+            <input type="text" id="wh-token" placeholder="Deixe em branco se não precisar de autenticação">
+          </div>
+          <div class="form-group">
+            <label>Eventos a receber</label>
+            <div class="events-grid" id="wh-events-select"></div>
+          </div>
+          <button class="btn btn-primary" id="btn-add-webhook">+ Adicionar</button>
+        </div>
+      </div>
+
+      <!-- Referência dos eventos -->
+      <div class="card">
+        <h2>📖 Referência dos Eventos</h2>
+        <div style="display:flex; flex-direction:column; gap:10px; font-size:0.84rem;">
+          <div>
+            <code style="background:rgba(16,185,129,0.12);padding:2px 8px;border-radius:5px;color:var(--accent-light)">messages.upsert</code>
+            <span style="color:var(--text-muted); margin-left:8px;">Mensagem recebida ou enviada pelo bot</span>
+          </div>
+          <div>
+            <code style="background:rgba(16,185,129,0.12);padding:2px 8px;border-radius:5px;color:var(--accent-light)">connection.update</code>
+            <span style="color:var(--text-muted); margin-left:8px;">WhatsApp conectou ou desconectou (<code>state: "open" | "close"</code>)</span>
+          </div>
+          <div>
+            <code style="background:rgba(16,185,129,0.12);padding:2px 8px;border-radius:5px;color:var(--accent-light)">qrcode.updated</code>
+            <span style="color:var(--text-muted); margin-left:8px;">Novo QR Code gerado (base64 e raw)</span>
+          </div>
+          <div>
+            <code style="background:rgba(16,185,129,0.12);padding:2px 8px;border-radius:5px;color:var(--accent-light)">messages.read</code>
+            <span style="color:var(--text-muted); margin-left:8px;">Mensagem lida pelo destinatário</span>
+          </div>
+          <div>
+            <code style="background:rgba(16,185,129,0.12);padding:2px 8px;border-radius:5px;color:var(--accent-light)">presence.update</code>
+            <span style="color:var(--text-muted); margin-left:8px;">Status de digitação / presença (futuro)</span>
+          </div>
+          <div>
+            <code style="background:rgba(16,185,129,0.12);padding:2px 8px;border-radius:5px;color:var(--accent-light)">custom</code>
+            <span style="color:var(--text-muted); margin-left:8px;">Evento personalizado — envie pelo endpoint <code>/api/:instance/send</code></span>
+          </div>
+        </div>
+        <div style="margin-top:16px; padding:12px 14px; background:rgba(0,0,0,0.25); border-radius:8px; font-size:0.8rem; color:var(--text-muted);">
+          <strong style="color:var(--text);">Payload padrão:</strong>
+          <pre style="margin-top:6px; overflow:auto; color:#94a3b8; line-height:1.6;">{
+  "event": "messages.upsert",
+  "instance": "<span id="payload-inst-name">nome-da-instancia</span>",
+  "data": { ... },
+  "timestamp": 1713983200000,
+  "date_time": "2025-04-24T20:00:00.000Z"
+}</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Aba Base de Conhecimento -->
+    <div id="tab-base" class="tab-content">
+      <div class="card">
+        <h2>📚 Base de Conhecimento</h2>
+        <p class="dica">
+          Cole aqui textos sobre seu negócio: <strong>FAQ, cardápio, preços, horários, políticas, procedimentos</strong>.
+          A IA usará esse conteúdo para responder seus clientes com precisão.
+        </p>
+        <div class="form-group">
+          <label>Conteúdo da base de conhecimento</label>
+          <textarea id="knowledgeBase" rows="18" placeholder="Exemplo:
+Nome do negócio: Restaurante Bom Sabor
+Horário: Segunda a sábado, 11h às 22h
+Endereço: Rua das Flores, 123 - São Paulo/SP
+
+Cardápio:
+- Prato do dia: R$ 25,00
+- Frango grelhado: R$ 35,00
+- Filé ao molho: R$ 45,00
+
+Formas de pagamento: Pix, cartão débito e crédito
+Entrega: Sim, raio de 5km, taxa R$ 5,00"
+          style="min-height:320px; font-family: monospace; font-size:0.88rem; line-height:1.6;"></textarea>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
+            <span style="font-size:0.78rem; color:var(--text-muted);">Máximo 50.000 caracteres</span>
+            <span id="kb-count" style="font-size:0.78rem; color:var(--text-muted);">0 / 50.000</span>
+          </div>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+          <button class="btn btn-primary" id="salvarBase">💾 Salvar Base</button>
+          <button class="btn btn-danger btn-sm" id="limparBase">🗑 Limpar</button>
+          <span id="base-status" style="font-size:0.82rem; color:var(--text-muted);"></span>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      Sistema proprietário &copy; <a href="https://nutef.com.br" target="_blank">Nutef - Soluções Digitais</a>
+      &nbsp;|&nbsp;
+      <a href="https://wa.me/5511918216190" target="_blank">💬 Suporte</a>
+    </footer>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    // ── Pegar nome da instância da URL ──
+    const params = new URLSearchParams(location.search);
+    const INSTANCE = params.get('instance') || '';
+    if (!INSTANCE) { alert('Nenhuma instância especificada. Voltando ao dashboard.'); location.href = '/'; }
+
+    const API = (path) => `/api/${INSTANCE}${path}`;
+    const $ = id => document.getElementById(id);
+
+    // ── Título ──
+    $('inst-title').textContent = `🤖 ${INSTANCE}`;
+    $('inst-slug').textContent = `/?instance=${INSTANCE}`;
+    document.title = `${INSTANCE} — Agente IA WhatsApp`;
+    $('payload-inst-name').textContent = INSTANCE;
+
+    // ── Toast ──
+    let toastTimer;
+    function toast(msg, type = 'ok') {
+      const t = $('toast');
+      t.textContent = msg;
+      t.className = `show ${type}`;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { t.className = ''; }, 3000);
+    }
+
+    // ── Socket.IO vinculado à instância ──
+    const socket = io({ query: { instance: INSTANCE } });
+
+    // ── Interceptar 401 globalmente ──
+    const _origFetch = window.fetch;
+    window.fetch = async (...args) => {
+      const r = await _origFetch(...args);
+      if (r.status === 401) { window.location.href = '/login'; }
+      return r;
+    };
+
+    // ── Logout ──
+    document.getElementById('btn-logout').addEventListener('click', async () => {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      window.location.href = '/login';
+    });
+
+    socket.on('qr', (qrDataUrl) => {
+      const area = $('qr-area');
+      const qrCard = $('qr-card');
+      if (qrDataUrl === 'loading') {
+        area.innerHTML = `<div class="qr-msg pending qr-loading">⏳ Aguarde 1-2 minutos. O QR Code aparecerá aqui.</div>`;
+        $('btnDesconectar').style.display = 'none';
+        qrCard.classList.add('connecting');
+      } else if (qrDataUrl) {
+        area.innerHTML = `<img src="${qrDataUrl}" alt="QR Code"><div class="qr-msg pending">📱 Escaneie com o WhatsApp → Aparelhos conectados</div>`;
+        $('btnDesconectar').style.display = 'none';
+        qrCard.classList.add('connecting');
+      } else {
+        area.innerHTML = `<div class="qr-msg ok">✅ WhatsApp conectado com sucesso!</div>`;
+        $('btnDesconectar').style.display = 'inline-flex';
+        qrCard.classList.remove('connecting');
+      }
+    });
+
+    socket.on('status', (s) => {
+      const badge = $('status-badge');
+      badge.className = `badge ${s.conectado ? 'connected' : 'disconnected'}`;
+      badge.textContent = s.conectado ? 'Conectado' : 'Offline';
+      if (!s.conectado) $('btnDesconectar').style.display = 'none';
+    });
+
+    // ── Tabs ──
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('ativo'));
+        btn.classList.add('active');
+        $(`tab-${btn.dataset.tab}`).classList.add('ativo');
+      });
+    });
+
+    // ── Botões WhatsApp ──
+    $('btnGerarQR').addEventListener('click', async () => {
+      $('btnGerarQR').disabled = true; $('btnLimpar').disabled = true;
+      $('btnGerarQR').textContent = '⏳ Gerando...';
+      try { await fetch(API('/whatsapp/restart'), { method: 'POST' }); } catch (e) {}
+      setTimeout(() => {
+        $('btnGerarQR').disabled = false; $('btnLimpar').disabled = false;
+        $('btnGerarQR').textContent = '🔄 Gerar QR Code';
+      }, 3000);
+    });
+
+    $('btnLimpar').addEventListener('click', async () => {
+      if (!confirm('Isso vai limpar a sessão. Você precisará escanear o QR Code novamente. Continuar?')) return;
+      $('btnGerarQR').disabled = true; $('btnLimpar').disabled = true;
+      $('btnLimpar').textContent = '⏳ Limpando...';
+      try { await fetch(API('/whatsapp/restart?limpar=1'), { method: 'POST' }); } catch (e) {}
+      setTimeout(() => {
+        $('btnGerarQR').disabled = false; $('btnLimpar').disabled = false;
+        $('btnLimpar').textContent = '🧹 Limpar sessão e tentar';
+      }, 3000);
+    });
+
+    $('btnDesconectar').addEventListener('click', async () => {
+      if (!confirm('Desconectar o WhatsApp desta instância?')) return;
+      $('btnDesconectar').disabled = true;
+      try { await fetch(API('/whatsapp/disconnect'), { method: 'POST' }); } catch (e) {}
+      $('btnDesconectar').disabled = false;
+      $('btnDesconectar').style.display = 'none';
+    });
+
+    // ── Humano atendendo ──
+    $('humanoAtendeu').addEventListener('change', async function () {
+      const ativo = this.checked;
+      try {
+        await fetch(API('/humano-atendeu'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ativo }),
+        });
+        $('humano-box').classList.toggle('ativo', ativo);
+        toast(ativo ? '👤 Bot pausado — humano atendendo' : '🤖 Bot reativado', 'ok');
+      } catch (e) { toast('Erro ao salvar.', 'err'); }
+    });
+
+    // ── Carregar config ──
+    async function carregarConfig() {
+      try {
+        const r = await fetch(API('/config/full'));
+        const cfg = await r.json();
+        $('groqKey').value = cfg.groqApiKey || '';
+        $('useAI').checked = cfg.useAI !== false;
+        $('promptSistema').value = cfg.promptSistema || '';
+        $('modeloGroq').value = cfg.model || 'llama-3.1-8b-instant';
+        $('humanoAtendeu').checked = !!cfg.humanoAtendeu;
+        $('humano-box').classList.toggle('ativo', !!cfg.humanoAtendeu);
+        if (cfg.knowledgeBase !== undefined) $('knowledgeBase').value = cfg.knowledgeBase || '';
+        updateKbCount();
+        renderFluxos(cfg.flows || []);
+        renderWebhooks(cfg.webhooks || []);
+      } catch (e) { toast('Erro ao carregar configuração.', 'err'); }
+    }
+
+    // ── Salvar config global ──
+    async function salvarConfig(extra = {}) {
+      const body = {
+        groqApiKey: $('groqKey').value.trim(),
+        useAI: $('useAI').checked,
+        model: $('modeloGroq').value,
+        promptSistema: $('promptSistema').value.trim(),
+        ...extra,
+      };
+      const r = await fetch(API('/config'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return r.json();
+    }
+
+    $('salvarGroq').addEventListener('click', async () => {
+      try { await salvarConfig(); toast('✅ Configuração salva!'); }
+      catch (e) { toast('Erro ao salvar.', 'err'); }
+    });
+    $('salvarModelo').addEventListener('click', async () => {
+      try { await salvarConfig(); toast('✅ Modelo e prompt salvos!'); }
+      catch (e) { toast('Erro ao salvar.', 'err'); }
+    });
+
+    // ── Fluxos ──
+    function escHtml(s) {
+      const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML;
+    }
+
+    function renderFluxos(flows) {
+      $('lista-fluxos').innerHTML = flows.map((f, i) => `
+        <div class="flow-item" data-idx="${i}">
+          <div class="flow-header">
+            <span>Fluxo ${i + 1}</span>
+            <button class="btn btn-danger btn-sm" onclick="removerFluxo(${i})">🗑 Remover</button>
+          </div>
+          <div class="form-group">
+            <label>Palavras-chave (separadas por vírgula)</label>
+            <input class="flow-palavras-input" type="text" placeholder="oi, olá, bom dia" value="${escHtml((f.palavras || []).join(', '))}">
+          </div>
+          <div class="form-group">
+            <label>Resposta do bot</label>
+            <textarea class="flow-resposta-input" placeholder="Digite a resposta...">${escHtml(f.resposta || '')}</textarea>
+          </div>
+        </div>`).join('');
+    }
+
+    function coletarFluxos() {
+      return Array.from(document.querySelectorAll('.flow-item')).map((el, i) => ({
+        id: String(i + 1),
+        palavras: (el.querySelector('.flow-palavras-input')?.value || '').split(',').map(p => p.trim()).filter(Boolean),
+        resposta: el.querySelector('.flow-resposta-input')?.value || '',
+      }));
+    }
+
+    window.removerFluxo = (i) => { const f = coletarFluxos(); f.splice(i, 1); renderFluxos(f); };
+
+    $('novoFluxo').addEventListener('click', () => {
+      const f = coletarFluxos();
+      f.push({ id: String(f.length + 1), palavras: [], resposta: '' });
+      renderFluxos(f);
+    });
+
+    // Debounce autosave
+    let debFluxo;
+    // CORREÇÃO: salvar manualmente cancela o debounce pendente (evita race condition)
+    function cancelDebounce() { clearTimeout(debFluxo); debFluxo = null; }
+
+    $('salvarFluxos').addEventListener('click', async () => {
+      cancelDebounce(); // cancela autosave pendente antes de salvar manualmente
+      const flows = coletarFluxos();
+      try {
+        await fetch(API('/config'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flows }),
+        });
+        toast('✅ Fluxos salvos!');
+      } catch (e) { toast('Erro ao salvar fluxos.', 'err'); }
+    });
+
+    document.addEventListener('input', (e) => {
+      if (e.target.closest('.flow-item')) {
+        clearTimeout(debFluxo);
+        debFluxo = setTimeout(() => {
+          fetch(API('/config'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ flows: coletarFluxos() }),
+          });
+        }, 1500);
+      }
+    });
+
+    // ── Webhooks ──
+    const ALL_EVENTS = [
+      'messages.upsert', 'connection.update', 'qrcode.updated',
+      'messages.read', 'presence.update', 'custom'
+    ];
+
+    // Renderizar checkboxes de seleção de eventos no formulário de novo webhook
+    function renderEventCheckboxes(containerId, selectedEvents = []) {
+      const container = $(containerId);
+      container.innerHTML = ALL_EVENTS.map(ev => `
+        <label class="event-check ${selectedEvents.includes(ev) ? 'checked' : ''}">
+          <input type="checkbox" value="${ev}" ${selectedEvents.includes(ev) ? 'checked' : ''}
+            onchange="this.closest('.event-check').classList.toggle('checked', this.checked)">
+          ${ev}
+        </label>`).join('');
+    }
+
+    renderEventCheckboxes('wh-events-select', ['messages.upsert', 'connection.update', 'qrcode.updated']);
+
+    let webhooksData = [];
+
+    function renderWebhooks(list) {
+      webhooksData = list;
+      const container = $('lista-webhooks');
+      if (list.length === 0) {
+        container.innerHTML = `<p style="color:var(--text-muted); font-size:0.87rem; margin-bottom:12px;">Nenhum webhook configurado.</p>`;
+        return;
+      }
+      container.innerHTML = list.map((wh, i) => `
+        <div class="webhook-item ${wh.enabled === false ? 'disabled-wh' : ''}">
+          <div class="webhook-header">
+            <div class="webhook-url">${escHtml(wh.url)}</div>
+            <div style="display:flex;gap:6px;flex-shrink:0;">
+              <button class="btn btn-sm ${wh.enabled === false ? 'btn-primary' : 'btn-yellow'}"
+                onclick="toggleWebhook(${i})">${wh.enabled === false ? '▶ Ativar' : '⏸ Pausar'}</button>
+              <button class="btn btn-danger btn-sm" onclick="removeWebhook(${i})">🗑</button>
+            </div>
+          </div>
+          <div class="events-grid">
+            ${ALL_EVENTS.map(ev => `
+              <span class="event-check ${(wh.events||[]).includes(ev) ? 'checked' : ''}" style="cursor:default;">
+                ${(wh.events||[]).includes(ev) ? '✓' : '·'} ${ev}
+              </span>`).join('')}
+          </div>
+          ${wh.token ? `<div style="font-size:0.75rem;color:var(--text-muted);">🔑 Bearer token configurado</div>` : ''}
+        </div>`).join('');
+    }
+
+    async function saveWebhooks() {
+      await fetch(API('/config'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ webhooks: webhooksData }),
+      });
+    }
+
+    window.removeWebhook = async (i) => {
+      if (!confirm('Remover este webhook?')) return;
+      webhooksData.splice(i, 1);
+      await saveWebhooks();
+      renderWebhooks(webhooksData);
+      toast('🗑 Webhook removido.');
+    };
+
+    window.toggleWebhook = async (i) => {
+      webhooksData[i].enabled = webhooksData[i].enabled === false ? true : false;
+      await saveWebhooks();
+      renderWebhooks(webhooksData);
+      toast(webhooksData[i].enabled === false ? '⏸ Webhook pausado.' : '▶ Webhook ativo.');
+    };
+
+    $('btn-add-webhook').addEventListener('click', async () => {
+      const url = $('wh-url').value.trim();
+      if (!url || !url.startsWith('http')) { toast('URL inválida. Use https://...', 'err'); return; }
+
+      const checked = Array.from(document.querySelectorAll('#wh-events-select input:checked')).map(el => el.value);
+      if (checked.length === 0) { toast('Selecione ao menos um evento.', 'err'); return; }
+
+      const newWh = {
+        url,
+        token: $('wh-token').value.trim() || undefined,
+        events: checked,
+        enabled: true,
+      };
+      webhooksData.push(newWh);
+      try {
+        await saveWebhooks();
+        $('wh-url').value = '';
+        $('wh-token').value = '';
+        renderEventCheckboxes('wh-events-select', ['messages.upsert', 'connection.update', 'qrcode.updated']);
+        renderWebhooks(webhooksData);
+        toast('✅ Webhook adicionado!');
+      } catch (e) { toast('Erro ao salvar webhook.', 'err'); webhooksData.pop(); }
+    });
+
+    // ── Base de Conhecimento ──
+    function updateKbCount() {
+      const len = $('knowledgeBase').value.length;
+      $('kb-count').textContent = `${len.toLocaleString('pt-BR')} / 50.000`;
+      $('kb-count').style.color = len > 45000 ? 'var(--red)' : 'var(--text-muted)';
+    }
+    $('knowledgeBase').addEventListener('input', updateKbCount);
+
+    $('salvarBase').addEventListener('click', async () => {
+      const kb = $('knowledgeBase').value;
+      if (kb.length > 50000) { toast('Texto muito longo. Máximo 50.000 caracteres.', 'err'); return; }
+      $('salvarBase').disabled = true;
+      $('base-status').textContent = 'Salvando...';
+      try {
+        const r = await fetch(API('/config'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ knowledgeBase: kb })
+        });
+        if (r.ok) { toast('Base de conhecimento salva! ✅'); $('base-status').textContent = 'Salvo ✓'; }
+        else { toast('Erro ao salvar.', 'err'); $('base-status').textContent = ''; }
+      } catch { toast('Erro de rede.', 'err'); }
+      finally { $('salvarBase').disabled = false; }
+    });
+
+    $('limparBase').addEventListener('click', () => {
+      if (confirm('Limpar toda a base de conhecimento?')) {
+        $('knowledgeBase').value = '';
+        updateKbCount();
+        $('base-status').textContent = '';
+      }
+    });
+
+    // Init
+    carregarConfig();
+  </script>
+</body>
+</html>

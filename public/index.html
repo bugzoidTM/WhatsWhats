@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard — Agente IA WhatsApp</title>
+  <meta name="description" content="MicroSaaS multi-instância para automação WhatsApp com IA. Gerencie múltiplos números de telefone em um só painel.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-1: #080d0e;
+      --bg-2: #0e1815;
+      --card: rgba(255,255,255,0.04);
+      --card-border: rgba(16,185,129,0.12);
+      --accent: #10b981;
+      --accent-light: #34d399;
+      --accent-glow: rgba(16,185,129,0.25);
+      --green: #22c55e;
+      --green-light: rgba(34,197,94,0.1);
+      --red: #ef4444;
+      --red-light: rgba(239,68,68,0.12);
+      --yellow: #f59e0b;
+      --yellow-light: rgba(245,158,11,0.15);
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --radius: 14px;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-1);
+      min-height: 100vh;
+      color: var(--text);
+      padding: 24px 16px 48px;
+    }
+
+    /* ── Animated background ── */
+    body::before {
+      content: "";
+      position: fixed; inset: 0; z-index: -1;
+      background:
+        radial-gradient(ellipse 80% 60% at 0% 0%, rgba(16,185,129,0.08) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 100% 100%, rgba(5,150,105,0.05) 0%, transparent 50%),
+        var(--bg-1);
+    }
+
+    .wrap { max-width: 960px; margin: 0 auto; }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center; justify-content: space-between;
+      gap: 16px; flex-wrap: wrap;
+      padding: 12px 0 32px;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .brand-icon {
+      width: 56px; height: 56px; border-radius: 14px;
+      background: linear-gradient(135deg, #10b981, #059669);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.6rem; flex-shrink: 0;
+      box-shadow: 0 0 28px rgba(16,185,129,0.4), 0 4px 16px rgba(0,0,0,0.4);
+    }
+    .brand-text h1 { font-size: 1.3rem; font-weight: 700; }
+    .brand-text p  { font-size: 0.8rem; color: var(--text-muted); margin-top: 3px; }
+
+    /* ── Stats bar ── */
+    .stats-bar {
+      display: grid; grid-template-columns: repeat(3, 1fr);
+      gap: 12px; margin-bottom: 28px;
+    }
+    .stat-card {
+      background: var(--card); border: 1px solid var(--card-border);
+      border-radius: var(--radius); padding: 18px 22px;
+      backdrop-filter: blur(8px);
+    }
+    .stat-card.connected {
+      border-color: rgba(16,185,129,0.35);
+      box-shadow: 0 0 20px rgba(16,185,129,0.08);
+    }
+    .stat-card .label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-card .value { font-size: 1.9rem; font-weight: 700; margin-top: 5px; }
+    .stat-card.connected .value { color: var(--accent-light); }
+    .stat-card.total .value    { color: var(--text); }
+
+    /* ── Criar instância ── */
+    .create-bar {
+      display: flex; gap: 10px; align-items: center; margin-bottom: 28px; flex-wrap: wrap;
+    }
+    .create-bar input {
+      flex: 1; min-width: 200px;
+      padding: 11px 16px;
+      background: var(--card); border: 1px solid var(--card-border);
+      border-radius: 10px; color: var(--text); font-size: 0.95rem; font-family: inherit;
+      outline: none; transition: border-color 0.2s, box-shadow 0.2s;
+      backdrop-filter: blur(8px);
+    }
+    .create-bar input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+    .create-bar input::placeholder { color: var(--text-muted); }
+
+    /* ── Botões ── */
+    .btn {
+      padding: 10px 20px; border: none; border-radius: 10px;
+      font-family: inherit; font-size: 0.9rem; font-weight: 600;
+      cursor: pointer; transition: opacity 0.18s, transform 0.12s, box-shadow 0.18s;
+      display: inline-flex; align-items: center; gap: 7px; text-decoration: none;
+      white-space: nowrap;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #059669);
+      color: #fff;
+      box-shadow: 0 0 0 0 var(--accent-glow);
+      border: none;
+    }
+    .btn-primary:hover { box-shadow: 0 0 20px var(--accent-glow); opacity: 0.92; }
+    .btn-danger  { background: var(--red-light); color: var(--red); border: 1px solid rgba(239,68,68,0.22); }
+    .btn-danger:hover { background: rgba(239,68,68,0.22); }
+    .btn-ghost   { background: var(--card); color: var(--text); border: 1px solid var(--card-border); backdrop-filter: blur(8px); }
+    .btn-ghost:hover { border-color: var(--accent-light); color: var(--accent-light); }
+    .btn-sm { padding: 7px 14px; font-size: 0.82rem; border-radius: 8px; }
+
+    /* ── Grid de instâncias ── */
+    #instances-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+    }
+
+    .inst-card {
+      background: var(--card); border: 1px solid var(--card-border);
+      border-radius: var(--radius); padding: 20px;
+      display: flex; flex-direction: column; gap: 14px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      animation: fadeIn 0.3s ease;
+      backdrop-filter: blur(8px);
+      position: relative;
+      overflow: hidden;
+    }
+    .inst-card::before {
+      content: "";
+      position: absolute; inset: 0; left: 0; top: 0; bottom: 0;
+      width: 3px;
+      background: transparent;
+      border-radius: var(--radius) 0 0 var(--radius);
+      transition: background 0.2s;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    .inst-card:hover { border-color: rgba(16,185,129,0.22); box-shadow: 0 4px 28px rgba(0,0,0,0.5); }
+    .inst-card.is-connected {
+      border-color: rgba(16,185,129,0.28);
+      box-shadow: 0 0 16px rgba(16,185,129,0.06);
+    }
+    .inst-card.is-connected::before {
+      background: rgba(16,185,129,0.6);
+    }
+
+    .inst-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .inst-name { font-size: 1rem; font-weight: 700; word-break: break-all; }
+    .inst-slug { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; font-family: monospace; }
+
+    .badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 10px; border-radius: 100px; font-size: 0.72rem; font-weight: 600;
+      flex-shrink: 0;
+    }
+    .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; }
+    .badge.connected    { background: var(--green-light); color: var(--green); }
+    .badge.connected::before { background: var(--green); box-shadow: 0 0 6px var(--green); animation: blink 1.5s ease-in-out infinite; }
+    .badge.disconnected { background: rgba(100,116,139,0.15); color: var(--text-muted); }
+    .badge.disconnected::before { background: var(--text-muted); }
+    @keyframes blink { 50% { opacity: 0.4; } }
+
+    .inst-meta { font-size: 0.78rem; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px; }
+    .inst-meta span { display: flex; align-items: center; gap: 6px; }
+
+    .humano-badge {
+      background: var(--yellow-light); color: var(--yellow);
+      border-radius: 6px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;
+      display: inline-block; margin-top: 2px;
+    }
+
+    .inst-actions { display: flex; gap: 8px; margin-top: auto; }
+    .inst-actions .btn { flex: 1; justify-content: center; }
+
+    /* ── Empty state ── */
+    #empty-state {
+      grid-column: 1 / -1;
+      text-align: center; padding: 60px 20px;
+      color: var(--text-muted);
+    }
+    #empty-state .icon { font-size: 3rem; margin-bottom: 16px; opacity: 0.5; }
+    #empty-state p { font-size: 1rem; }
+    #empty-state small { font-size: 0.85rem; opacity: 0.7; margin-top: 6px; display: block; }
+
+    /* ── Notificação toast ── */
+    #toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+      background: var(--bg-2); border: 1px solid var(--card-border); border-radius: 10px;
+      padding: 12px 22px; font-size: 0.9rem; color: var(--text);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5); transition: all 0.25s;
+      opacity: 0; pointer-events: none; z-index: 9999; white-space: nowrap;
+      backdrop-filter: blur(8px);
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #toast.ok  { border-color: rgba(16,185,129,0.35); color: var(--accent-light); }
+    #toast.err { border-color: rgba(239,68,68,0.3);  color: var(--red); }
+
+    /* ── Footer ── */
+    footer {
+      margin-top: 40px; text-align: center;
+      font-size: 0.78rem; color: var(--text-muted);
+      border-top: 1px solid var(--card-border); padding-top: 20px;
+    }
+    footer a { color: var(--accent-light); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* ── Header actions ── */
+    .header-actions { display: flex; gap: 8px; align-items: center; }
+    .btn-logout {
+      padding: 9px 18px; border-radius: 10px;
+      background: var(--red-light); color: var(--red);
+      border: 1px solid rgba(239,68,68,0.22);
+      font-family: inherit; font-size: 0.84rem; font-weight: 600;
+      cursor: pointer; transition: background 0.18s, box-shadow 0.18s;
+      backdrop-filter: blur(8px);
+    }
+    .btn-logout:hover { background: rgba(239,68,68,0.22); box-shadow: 0 0 12px rgba(239,68,68,0.15); }
+    .btn-chpw {
+      padding: 9px 18px; border-radius: 10px;
+      background: var(--card); color: var(--text-muted);
+      border: 1px solid var(--card-border);
+      font-family: inherit; font-size: 0.84rem; font-weight: 500;
+      cursor: pointer; transition: border-color 0.18s, color 0.18s;
+      backdrop-filter: blur(8px);
+    }
+    .btn-chpw:hover { border-color: var(--accent-light); color: var(--accent-light); }
+
+    /* ── Modal ── */
+    .modal-overlay {
+      position: fixed; inset: 0; z-index: 1000;
+      background: rgba(0,0,0,0.7); backdrop-filter: blur(6px);
+      display: flex; align-items: center; justify-content: center;
+      padding: 24px; opacity: 0; pointer-events: none; transition: opacity 0.2s;
+    }
+    .modal-overlay.show { opacity: 1; pointer-events: auto; }
+    .modal {
+      background: var(--bg-2); border: 1px solid var(--card-border);
+      border-radius: 18px; padding: 28px; width: 100%; max-width: 390px;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.7), 0 0 0 1px rgba(16,185,129,0.08);
+      transform: translateY(14px); transition: transform 0.22s;
+      backdrop-filter: blur(12px);
+    }
+    .modal-overlay.show .modal { transform: none; }
+    .modal h3 { font-size: 1rem; font-weight: 700; margin-bottom: 20px; color: var(--text); }
+    .modal .form-group { margin-bottom: 13px; }
+    .modal .form-group label { display: block; font-size: 0.82rem; color: var(--text-muted); margin-bottom: 5px; }
+    .modal .form-group input {
+      width: 100%; padding: 10px 13px;
+      background: rgba(0,0,0,0.3); border: 1px solid var(--card-border);
+      border-radius: 9px; color: var(--text); font-size: 0.9rem; font-family: inherit;
+      outline: none; transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .modal .form-group input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+    .modal-actions { display: flex; gap: 8px; margin-top: 18px; }
+    .modal-actions .btn { flex: 1; justify-content: center; }
+
+    @media (max-width: 600px) {
+      .stats-bar { grid-template-columns: 1fr 1fr; }
+      header { flex-direction: column; align-items: flex-start; }
+      .header-actions { margin-top: 4px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <header>
+      <div class="brand">
+        <div class="brand-icon">🤖</div>
+        <div class="brand-text">
+          <h1>Agente IA WhatsApp</h1>
+          <p>Nutef - MicroSaaS Multi-instância</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="btn-chpw" id="btn-chpw" title="Trocar senha">🔑 Senha</button>
+        <button class="btn-logout" id="btn-logout">⏏ Sair</button>
+      </div>
+    </header>
+
+    <!-- Modal Trocar Senha -->
+    <div class="modal-overlay" id="modal-chpw">
+      <div class="modal">
+        <h3>🔑 Trocar Senha</h3>
+        <div class="form-group">
+          <label>Senha atual</label>
+          <input type="password" id="chpw-current" placeholder="Senha atual" autocomplete="current-password">
+        </div>
+        <div class="form-group">
+          <label>Nova senha (mín. 6 caracteres)</label>
+          <input type="password" id="chpw-new" placeholder="Nova senha" autocomplete="new-password">
+        </div>
+        <div class="form-group">
+          <label>Confirmar nova senha</label>
+          <input type="password" id="chpw-confirm" placeholder="Confirme a nova senha" autocomplete="new-password">
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="btn-chpw-cancel">Cancelar</button>
+          <button class="btn btn-primary" id="btn-chpw-save">💾 Salvar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-bar">
+      <div class="stat-card total">
+        <div class="label">Total de instâncias</div>
+        <div class="value" id="stat-total">–</div>
+      </div>
+      <div class="stat-card connected">
+        <div class="label">Conectadas agora</div>
+        <div class="value" id="stat-connected">–</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Desconectadas</div>
+        <div class="value" id="stat-disconnected" style="color:var(--text-muted)">–</div>
+      </div>
+    </div>
+
+    <!-- Criar nova instância -->
+    <div class="create-bar">
+      <input type="text" id="new-name" placeholder="Nome da nova instância (ex: loja-centro, bot-vendas)" maxlength="40">
+      <button class="btn btn-primary" id="btn-create">
+        <span>+</span> Criar instância
+      </button>
+    </div>
+
+    <!-- Grid de instâncias -->
+    <div id="instances-grid">
+      <div id="empty-state" style="display:none">
+        <div class="icon">📭</div>
+        <p>Nenhuma instância criada</p>
+        <small>Digite um nome acima e clique em "Criar instância" para começar.</small>
+      </div>
+    </div>
+
+    <footer>
+      Sistema proprietário &copy; <a href="https://nutef.com.br" target="_blank">Nutef - Soluções Digitais</a>
+      &nbsp;|&nbsp;
+      <a href="https://wa.me/5511918216190" target="_blank">💬 Suporte WhatsApp</a>
+    </footer>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    let allInstances = [];
+
+    // ── Helpers ──
+    const $ = id => document.getElementById(id);
+    let toastTimer;
+    function toast(msg, type = 'ok') {
+      const t = $('toast');
+      t.textContent = msg;
+      t.className = `show ${type}`;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { t.className = ''; }, 3000);
+    }
+
+    // ── Atualizar stats ──
+    function updateStats(list) {
+      const connected = list.filter(i => i.connected).length;
+      $('stat-total').textContent       = list.length;
+      $('stat-connected').textContent   = connected;
+      $('stat-disconnected').textContent = list.length - connected;
+    }
+
+    // ── Renderizar cards ──
+    function renderInstances(list) {
+      allInstances = list;
+      updateStats(list);
+      const grid = $('instances-grid');
+
+      // Manter empty-state
+      let emptyEl = $('empty-state');
+      if (!emptyEl) {
+        emptyEl = document.createElement('div');
+        emptyEl.id = 'empty-state';
+        emptyEl.innerHTML = `<div class="icon">📭</div><p>Nenhuma instância criada</p><small>Digite um nome acima e clique em "Criar instância" para começar.</small>`;
+        grid.appendChild(emptyEl);
+      }
+
+      // Remover cards antigos
+      grid.querySelectorAll('.inst-card').forEach(c => c.remove());
+
+      if (list.length === 0) {
+        emptyEl.style.display = '';
+        return;
+      }
+      emptyEl.style.display = 'none';
+
+      list.forEach(inst => {
+        const card = buildCard(inst);
+        grid.appendChild(card);
+      });
+    }
+
+    function buildCard(inst) {
+      const card = document.createElement('div');
+      card.className = `inst-card${inst.connected ? ' is-connected' : ''}`;
+      card.dataset.name = inst.name;
+
+      card.innerHTML = `
+        <div class="inst-header">
+          <div>
+            <div class="inst-name">${escHtml(inst.name)}</div>
+            <div class="inst-slug">/: ${escHtml(inst.name)}</div>
+          </div>
+          <span class="badge ${inst.connected ? 'connected' : 'disconnected'}">
+            ${inst.connected ? 'Conectado' : 'Offline'}
+          </span>
+        </div>
+        <div class="inst-meta">
+          ${inst.humanoAtendeu ? '<span class="humano-badge">👤 Humano atendendo</span>' : ''}
+        </div>
+        <div class="inst-actions">
+          <a href="/instance.html?instance=${encodeURIComponent(inst.name)}" class="btn btn-ghost btn-sm">⚙️ Gerenciar</a>
+          <button class="btn btn-danger btn-sm" onclick="deleteInstance('${escHtml(inst.name)}')">🗑</button>
+        </div>
+      `;
+      return card;
+    }
+
+    function updateCard(name, data) {
+      const card = document.querySelector(`.inst-card[data-name="${name}"]`);
+      if (!card) return;
+      card.classList.toggle('is-connected', data.connected);
+      const badge = card.querySelector('.badge');
+      if (badge) {
+        badge.className = `badge ${data.connected ? 'connected' : 'disconnected'}`;
+        badge.lastChild.textContent = data.connected ? 'Conectado' : ' Offline';
+      }
+      const idx = allInstances.findIndex(i => i.name === name);
+      if (idx !== -1) { allInstances[idx].connected = data.connected; updateStats(allInstances); }
+    }
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // ── Carregar instâncias ──
+    async function loadInstances() {
+      try {
+        const r = await fetch('/api/instances');
+        const list = await r.json();
+        renderInstances(list);
+      } catch (e) {
+        toast('Erro ao carregar instâncias.', 'err');
+      }
+    }
+
+    // ── Criar instância ──
+    $('btn-create').addEventListener('click', async () => {
+      const name = $('new-name').value.trim();
+      if (!name) { toast('Digite um nome para a instância.', 'err'); return; }
+      $('btn-create').disabled = true;
+      try {
+        const r = await fetch('/api/instances', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.error) { toast(d.error || 'Erro ao criar.', 'err'); return; }
+        $('new-name').value = '';
+        toast(`✅ Instância "${name}" criada!`, 'ok');
+        await loadInstances();
+      } catch (e) {
+        toast('Erro de rede.', 'err');
+      } finally {
+        $('btn-create').disabled = false;
+      }
+    });
+
+    $('new-name').addEventListener('keydown', e => { if (e.key === 'Enter') $('btn-create').click(); });
+
+    // ── Deletar instância ──
+    window.deleteInstance = async function(name) {
+      if (!confirm(`Deletar a instância "${name}"?\nIsso encerrará a sessão WhatsApp e removerá todos os dados.`)) return;
+      try {
+        const r = await fetch(`/api/instances/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        const d = await r.json();
+        if (d.ok) { toast(`🗑 Instância "${name}" removida.`, 'ok'); await loadInstances(); }
+        else toast('Erro ao remover.', 'err');
+      } catch (e) {
+        toast('Erro de rede.', 'err');
+      }
+    };
+
+    // ── Socket.IO — atualização de status em tempo real ──
+    socket.on('instance_update', (data) => updateCard(data.name, data));
+    socket.on('instance_removed', (data) => { allInstances = allInstances.filter(i => i.name !== data.name); renderInstances(allInstances); });
+
+    // ── Interceptar 401 globalmente ──
+    const _origFetch = window.fetch;
+    window.fetch = async (...args) => {
+      const r = await _origFetch(...args);
+      if (r.status === 401) { window.location.href = '/login'; }
+      return r;
+    };
+
+    // ── Logout ──
+    $('btn-logout').addEventListener('click', async () => {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      window.location.href = '/login';
+    });
+
+    // ── Trocar Senha ──
+    $('btn-chpw').addEventListener('click', () => {
+      $('chpw-current').value = ''; $('chpw-new').value = ''; $('chpw-confirm').value = '';
+      $('modal-chpw').classList.add('show');
+      $('chpw-current').focus();
+    });
+    $('btn-chpw-cancel').addEventListener('click', () => $('modal-chpw').classList.remove('show'));
+    $('modal-chpw').addEventListener('click', (e) => { if (e.target === $('modal-chpw')) $('modal-chpw').classList.remove('show'); });
+    $('btn-chpw-save').addEventListener('click', async () => {
+      const cur = $('chpw-current').value;
+      const nw  = $('chpw-new').value;
+      const cf  = $('chpw-confirm').value;
+      if (!cur || !nw || !cf) { toast('Preencha todos os campos.', 'err'); return; }
+      if (nw !== cf) { toast('As senhas não coincidem.', 'err'); return; }
+      if (nw.length < 6) { toast('A nova senha deve ter pelo menos 6 caracteres.', 'err'); return; }
+      $('btn-chpw-save').disabled = true;
+      try {
+        const r = await fetch('/api/auth/change-password', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ currentPassword: cur, newPassword: nw }),
+        });
+        const d = await r.json();
+        if (r.ok && d.ok) {
+          toast('✅ Senha alterada com sucesso!', 'ok');
+          $('modal-chpw').classList.remove('show');
+        } else {
+          toast(d.error || 'Erro ao trocar senha.', 'err');
+        }
+      } catch (e) { toast('Erro de rede.', 'err'); }
+      finally { $('btn-chpw-save').disabled = false; }
+    });
+
+    // Init
+    loadInstances();
+    // Refresh automático a cada 30s
+    setInterval(loadInstances, 30000);
+  </script>
+</body>
+</html>

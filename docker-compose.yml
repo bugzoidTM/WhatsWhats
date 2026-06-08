@@ -1,0 +1,98 @@
+version: "3.7"
+
+# =====================================================================
+# AGENTE IA WHATSAPP — Nutef Soluções Digitais
+# Stack para Portainer com Traefik (rede Nutef)
+#
+# ANTES DE FAZER DEPLOY, configure as variáveis de ambiente:
+#   DOMAIN      → seu subdomínio (ex: whatsapp.nutef.com.br)
+#   SESSION_SECRET → string aleatória longa (ex: openssl rand -hex 32)
+#
+# Como fazer deploy pelo Portainer:
+#   1. Copie este arquivo como nova Stack no Portainer
+#   2. Ajuste as variáveis em "Environment variables"
+#   3. Clique em "Deploy the stack"
+# =====================================================================
+
+services:
+
+  agente-ia-whatsapp:
+    image: nutef/agente-ia-whatsapp:latest
+    # Ou use build se preferir compilar na VPS:
+    # build:
+    #   context: /opt/agente-ia-whatsapp
+    #   dockerfile: Dockerfile
+
+    networks:
+      - Nutef
+
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - LISTEN_HOST=0.0.0.0
+      # IMPORTANTE: Defina um valor seguro e aleatório abaixo
+      - SESSION_SECRET=${SESSION_SECRET:-mude-esta-chave-secreta-em-producao}
+
+    volumes:
+      # Persistência das sessões WhatsApp (QR codes escaneados)
+      - agente_ia_instances:/app/instances
+      # Persistência do arquivo de autenticação (senha do painel)
+      - agente_ia_auth:/app/auth_data
+
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+      resources:
+        limits:
+          memory: 1024M
+        reservations:
+          memory: 256M
+      labels:
+        # Traefik — habilitar roteamento
+        - traefik.enable=1
+
+        # Router HTTPS
+        - traefik.http.routers.agente-ia.rule=Host(`${DOMAIN:-whatsapp.nutef.com.br}`)
+        - traefik.http.routers.agente-ia.entrypoints=websecure
+        - traefik.http.routers.agente-ia.priority=1
+        - traefik.http.routers.agente-ia.tls.certresolver=letsencryptresolver
+
+        # Serviço interno na porta 3000
+        - traefik.http.services.agente-ia.loadbalancer.server.port=3000
+
+        # Middleware de segurança (headers)
+        - traefik.http.middlewares.agente-ia-headers.headers.stsSeconds=31536000
+        - traefik.http.middlewares.agente-ia-headers.headers.stsIncludeSubdomains=true
+        - traefik.http.middlewares.agente-ia-headers.headers.forceSTSHeader=true
+        - traefik.http.routers.agente-ia.middlewares=agente-ia-headers
+
+        # Redirect HTTP → HTTPS (opcional, se Traefik não fizer globalmente)
+        - traefik.http.routers.agente-ia-http.rule=Host(`${DOMAIN:-whatsapp.nutef.com.br}`)
+        - traefik.http.routers.agente-ia-http.entrypoints=web
+        - traefik.http.routers.agente-ia-http.middlewares=redirect-to-https
+        - traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
+        - traefik.http.middlewares.redirect-to-https.redirectscheme.permanent=true
+
+# ──────────────────────────────────────────────────────
+# Volumes persistentes (dados fora do container)
+# ──────────────────────────────────────────────────────
+volumes:
+  agente_ia_instances:
+    name: agente_ia_instances
+  agente_ia_auth:
+    name: agente_ia_auth
+
+# ──────────────────────────────────────────────────────
+# Rede externa Nutef (já existente no Swarm)
+# ──────────────────────────────────────────────────────
+networks:
+  Nutef:
+    external: true
+    name: Nutef
