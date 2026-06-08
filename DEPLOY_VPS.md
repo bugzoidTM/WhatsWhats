@@ -26,11 +26,11 @@ git init
 git add .
 git commit -m "feat: Agente IA WhatsApp - Nutef"
 
-# 3. Criar repositório no GitHub (via site github.com ou CLI)
-#    Exemplo: github.com/nutef/agente-ia-whatsapp (pode ser privado)
+# 3. Criar/Verificar repositório no GitHub (já foi feito e empurrado)
+#    Repositório: https://github.com/bugzoidTM/WhatsWhats
 
-# 4. Conectar e fazer push
-git remote add origin https://github.com/SEU_USUARIO/agente-ia-whatsapp.git
+# 4. Conectar e fazer push (já realizado no repositório principal)
+git remote add origin https://github.com/bugzoidTM/WhatsWhats.git
 git branch -M main
 git push -u origin main
 ```
@@ -49,7 +49,7 @@ ssh root@IP_DA_VPS
 cd /opt
 
 # Clonar o repositório
-git clone https://github.com/SEU_USUARIO/agente-ia-whatsapp.git agente-ia-whatsapp
+git clone https://github.com/bugzoidTM/WhatsWhats.git agente-ia-whatsapp
 
 # Entrar na pasta
 cd /opt/agente-ia-whatsapp
