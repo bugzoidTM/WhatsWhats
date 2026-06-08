@@ -30,8 +30,9 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - LISTEN_HOST=0.0.0.0
+      - AUTH_FILE_PATH=/app/auth_data/auth.json
       # IMPORTANTE: Defina um valor seguro e aleatório abaixo
-      - SESSION_SECRET=${SESSION_SECRET:-mude-esta-chave-secreta-em-producao}
+      - SESSION_SECRET=${SESSION_SECRET:-chavewhats}
 
     volumes:
       # Persistência das sessões WhatsApp (QR codes escaneados)
@@ -56,29 +57,29 @@ services:
           memory: 256M
       labels:
         # Traefik — habilitar roteamento
-        - traefik.enable=1
+        #- traefik.enable=1
 
         # Router HTTPS
-        - traefik.http.routers.agente-ia.rule=Host(`${DOMAIN:-whatsapp.nutef.com.br}`)
-        - traefik.http.routers.agente-ia.entrypoints=websecure
-        - traefik.http.routers.agente-ia.priority=1
-        - traefik.http.routers.agente-ia.tls.certresolver=letsencryptresolver
+        #- traefik.http.routers.agente-ia.rule=Host(`${DOMAIN:-whatsapp.nutef.com}`)
+        #- traefik.http.routers.agente-ia.entrypoints=websecure
+        #- traefik.http.routers.agente-ia.priority=1
+        #- traefik.http.routers.agente-ia.tls.certresolver=letsencryptresolver
 
         # Serviço interno na porta 3000
-        - traefik.http.services.agente-ia.loadbalancer.server.port=3000
+        #- traefik.http.services.agente-ia.loadbalancer.server.port=3000
 
         # Middleware de segurança (headers)
-        - traefik.http.middlewares.agente-ia-headers.headers.stsSeconds=31536000
-        - traefik.http.middlewares.agente-ia-headers.headers.stsIncludeSubdomains=true
-        - traefik.http.middlewares.agente-ia-headers.headers.forceSTSHeader=true
-        - traefik.http.routers.agente-ia.middlewares=agente-ia-headers
+        #- traefik.http.middlewares.agente-ia-headers.headers.stsSeconds=31536000
+        #- traefik.http.middlewares.agente-ia-headers.headers.stsIncludeSubdomains=true
+        #- traefik.http.middlewares.agente-ia-headers.headers.forceSTSHeader=true
+        #- traefik.http.routers.agente-ia.middlewares=agente-ia-headers
 
         # Redirect HTTP → HTTPS (opcional, se Traefik não fizer globalmente)
-        - traefik.http.routers.agente-ia-http.rule=Host(`${DOMAIN:-whatsapp.nutef.com.br}`)
-        - traefik.http.routers.agente-ia-http.entrypoints=web
-        - traefik.http.routers.agente-ia-http.middlewares=redirect-to-https
-        - traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
-        - traefik.http.middlewares.redirect-to-https.redirectscheme.permanent=true
+        #- traefik.http.routers.agente-ia-http.rule=Host(`${DOMAIN:-whatsapp.nutef.com}`)
+        #- traefik.http.routers.agente-ia-http.entrypoints=web
+        #- traefik.http.routers.agente-ia-http.middlewares=redirect-to-https
+        #- traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
+        #- traefik.http.middlewares.redirect-to-https.redirectscheme.permanent=true
 
 # ──────────────────────────────────────────────────────
 # Volumes persistentes (dados fora do container)

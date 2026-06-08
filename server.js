@@ -22,7 +22,7 @@ const OpenAI = require("openai");
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.LISTEN_HOST || "0.0.0.0";
 const INSTANCES_DIR = path.join(__dirname, "instances");
-const AUTH_FILE = path.join(__dirname, "auth.json");
+const AUTH_FILE = process.env.AUTH_FILE_PATH || path.join(__dirname, "auth.json");
 const RESERVED_NAMES = ["instances", "api", "socket.io", "public", "login", "setup"];
 
 if (!fs.existsSync(INSTANCES_DIR)) fs.mkdirSync(INSTANCES_DIR, { recursive: true });
@@ -240,6 +240,9 @@ function requireAuth(req, res, next) {
 }
 
 // ── Rotas públicas (sem autenticação) ──
+
+// GET /ping — Rota pública simples de healthcheck
+app.get("/ping", (req, res) => res.status(200).send("ok"));
 
 // GET /setup — página de cadastro de senha (apenas quando não configurado)
 app.get("/setup", (req, res) => {

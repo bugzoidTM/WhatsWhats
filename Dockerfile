@@ -34,15 +34,16 @@ COPY . .
 # Porta exposta (configurável via ENV)
 EXPOSE 3000
 
-# Usuário sem privilégios (segurança)
-RUN addgroup -g 1001 -S nodejs && \
+# Criar diretórios necessários e definir permissões para o usuário sem privilégios (segurança)
+RUN mkdir -p /app/instances /app/auth_data && \
+    addgroup -g 1001 -S nodejs && \
     adduser -S nodeuser -u 1001 -G nodejs && \
     chown -R nodeuser:nodejs /app
 
 USER nodeuser
 
-# Health check
+# Health check (usando /ping com 127.0.0.1 para evitar problemas de DNS interno e redirects)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/ping || exit 1
 
 CMD ["node", "server.js"]
