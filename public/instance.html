@@ -237,6 +237,8 @@
       .tab-buttons { gap: 4px; }
       .tab-btn { font-size: 0.8rem; padding: 8px 12px; }
     }
+    #tab-historico tr { transition: background-color 0.15s; }
+    #tab-historico tbody tr:hover { background: rgba(255,255,255,0.02); }
   </style>
 </head>
 <body>
@@ -282,6 +284,7 @@
       <button class="tab-btn" data-tab="modelo">⚙️ Modelo</button>
       <button class="tab-btn" data-tab="webhooks">🔗 Webhooks</button>
       <button class="tab-btn" data-tab="base">📚 Base</button>
+      <button class="tab-btn" data-tab="historico">💬 Histórico</button>
     </div>
 
     <!-- Aba Groq -->
@@ -458,6 +461,40 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
       </div>
     </div>
 
+    <!-- Aba Histórico de Mensagens -->
+    <div id="tab-historico" class="tab-content">
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+          <div>
+            <h2 style="margin:0;">💬 Histórico de Mensagens</h2>
+            <p class="dica" style="margin:5px 0 0 0;">
+              Exibe as últimas 200 interações desta instância (atualizadas em tempo real).
+            </p>
+          </div>
+          <button class="btn btn-primary" id="btn-atualizar-historico">🔄 Atualizar</button>
+        </div>
+        <div class="table-container" style="overflow-x:auto; max-height:500px; overflow-y:auto; border-radius: var(--radius); border: 1px solid var(--card-border);">
+          <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.9rem;">
+            <thead>
+              <tr style="background: rgba(16,185,129,0.08); border-bottom: 1px solid var(--card-border);">
+                <th style="padding:12px; color:var(--text-muted); width:150px;">Data/Hora</th>
+                <th style="padding:12px; color:var(--text-muted); width:200px;">Remetente</th>
+                <th style="padding:12px; color:var(--text-muted); width:100px;">Tipo</th>
+                <th style="padding:12px; color:var(--text-muted);">Mensagem</th>
+              </tr>
+            </thead>
+            <tbody id="historico-mensagens-corpo">
+              <tr>
+                <td colspan="4" style="padding:20px; text-align:center; color:var(--text-muted);">
+                  Carregando histórico...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <footer>
       Sistema proprietário &copy; <a href="https://nutef.com.br" target="_blank">Nutef - Soluções Digitais</a>
       &nbsp;|&nbsp;
@@ -542,6 +579,9 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
         document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('ativo'));
         btn.classList.add('active');
         $(`tab-${btn.dataset.tab}`).classList.add('ativo');
+        if (btn.dataset.tab === 'historico') {
+          carregarHistorico();
+        }
       });
     });
 
@@ -822,6 +862,47 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
         $('knowledgeBase').value = '';
         updateKbCount();
         $('base-status').textContent = '';
+      }
+    });
+
+    // ── Histórico de Mensagens ──
+    async function carregarHistorico() {
+      const corpo = $('historico-mensagens-corpo');
+      if (!corpo) return;
+      try {
+        const r = await fetch(API('/messages'));
+        if (!r.ok) throw new Error();
+        const msgs = await r.json();
+        if (msgs.length === 0) {
+          corpo.innerHTML = `<tr><td colspan="4" style="padding:20px; text-align:center; color:var(--text-muted);">Nenhuma mensagem registrada ainda.</td></tr>`;
+          return;
+        }
+        corpo.innerHTML = msgs.map(m => {
+          const dataHora = new Date(m.timestamp).toLocaleString('pt-BR');
+          const sender = m.fromMe ? '🤖 Bot (Enviada)' : `👤 ${m.pushName ? m.pushName + ' ' : ''}(${m.remoteJid.split('@')[0]})`;
+          const tipo = m.fromMe ? '<span style="color:var(--accent); font-weight:bold;">Saída</span>' : '<span style="color:var(--yellow); font-weight:bold;">Entrada</span>';
+          const textEscaped = m.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+          return `
+            <tr style="border-bottom: 1px solid var(--card-border);">
+              <td style="padding:12px; color:var(--text-muted); font-size:0.82rem; white-space:nowrap;">${dataHora}</td>
+              <td style="padding:12px; font-weight:500;">${sender}</td>
+              <td style="padding:12px; font-size:0.82rem;">${tipo}</td>
+              <td style="padding:12px; word-break:break-word; max-width:400px; line-height:1.4;">${textEscaped}</td>
+            </tr>
+          `;
+        }).join('');
+      } catch (e) {
+        corpo.innerHTML = `<tr><td colspan="4" style="padding:20px; text-align:center; color:var(--red);">❌ Erro ao carregar histórico de mensagens.</td></tr>`;
+      }
+    }
+
+    $('btn-atualizar-historico').addEventListener('click', carregarHistorico);
+
+    // Socket.IO escuta novas mensagens e atualiza o histórico em tempo real
+    socket.on('message_logged', (msg) => {
+      const activeTab = document.querySelector('.tab-btn.active');
+      if (activeTab && activeTab.dataset.tab === 'historico') {
+        carregarHistorico();
       }
     });
 

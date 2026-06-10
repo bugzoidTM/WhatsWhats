@@ -76,6 +76,29 @@ const instanceDir = (name) => path.join(INSTANCES_DIR, name);
 const configPath  = (name) => path.join(instanceDir(name), "config.json");
 const delay       = (ms)   => new Promise((r) => setTimeout(r, ms));
 
+function saveMessageEvent(instanceName, data) {
+  try {
+    const dir = instanceDir(instanceName);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, "messages.jsonl");
+    const record = {
+      timestamp: Date.now(),
+      fromMe: data.key?.fromMe || false,
+      remoteJid: data.key?.remoteJid || "",
+      messageId: data.key?.id || "",
+      text: data.message?.conversation || "",
+      pushName: data.pushName || "",
+    };
+    fs.appendFileSync(filePath, JSON.stringify(record) + "\n", "utf8");
+    if (typeof io !== "undefined" && io) {
+      io.to(instanceName).emit("message_logged", record);
+    }
+  } catch (e) {
+    console.error(`[${instanceName}] Erro ao salvar histórico de mensagem:`, e.message);
+  }
+}
+
+
 /**
  * Valida o nome de uma instância — previne Directory Traversal e nomes inválidos.
  * Retorna true se válido, false caso contrário.
@@ -396,6 +419,32 @@ app.get("/api/:instance/status", validateInstance, (req, res) => {
   res.json({ connected: inst?.connected || false });
 });
 
+// GET /api/:instance/messages — obter histórico de mensagens da instância
+app.get("/api/:instance/messages", validateInstance, (req, res) => {
+  try {
+    const filePath = path.join(instanceDir(req.params.instance), "messages.jsonl");
+    if (!fs.existsSync(filePath)) {
+      return res.json([]);
+    }
+    const content = fs.readFileSync(filePath, "utf8");
+    const lines = content.trim().split("\n");
+    const messages = [];
+    const limit = 200;
+    const startIndex = Math.max(0, lines.length - limit);
+    for (let i = lines.length - 1; i >= startIndex; i--) {
+      if (lines[i].trim()) {
+        try {
+          messages.push(JSON.parse(lines[i]));
+        } catch (_) {}
+      }
+    }
+    res.json(messages);
+  } catch (e) {
+    console.error(`[${req.params.instance}] Erro ao ler mensagens:`, e.message);
+    res.status(500).json({ error: "Erro ao ler histórico de mensagens." });
+  }
+});
+
 // GET /api/:instance/config — config mascarada
 app.get("/api/:instance/config", validateInstance, (req, res) => {
   const inst = getOrCreateInstance(req.params.instance);
@@ -694,13 +743,15 @@ async function handleMessage(instanceName, msg) {
     if (!texto) return;
 
     // Webhook — sempre dispara ao receber mensagem, independente do modo humano
-    await dispatchWebhook(instanceName, "messages.upsert", {
+    const incomingPayload = {
       key: { remoteJid: msg.from, fromMe: false, id: msg.id?._serialized },
       message: { conversation: texto },
       messageType: "conversation",
       messageTimestamp: msg.timestamp,
       pushName: msg.notifyName || "",
-    });
+    };
+    await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
+    saveMessageEvent(instanceName, incomingPayload);
 
     // Humano atendendo → bot NÃO responde, mas o webhook já foi disparado acima
     if (inst.config.humanoAtendeu) return;
@@ -715,12 +766,14 @@ async function handleMessage(instanceName, msg) {
     await msg.reply(resposta);
 
     // Webhook — resposta enviada pelo bot
-    await dispatchWebhook(instanceName, "messages.upsert", {
+    const outgoingPayload = {
       key: { remoteJid: msg.from, fromMe: true },
       message: { conversation: resposta },
       messageType: "conversation",
       messageTimestamp: Math.floor(Date.now() / 1000),
-    });
+    };
+    await dispatchWebhook(instanceName, "messages.upsert", outgoingPayload);
+    saveMessageEvent(instanceName, outgoingPayload);
   } catch (e) {
     console.error(`[${instanceName}] Erro ao processar mensagem:`, e);
     try { await msg.reply("Ocorreu um erro. Tente novamente em instantes."); } catch (_) {}
