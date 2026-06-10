@@ -506,14 +506,4 @@ Cada painel de instância entra em uma **room** própria via `socket.handshake.q
 
 ---
 
-## 📞 Suporte
 
-Desenvolvido por **Sâmara | TSG Soluções Digitais**
-
-- 🌐 [tsgsites.com.br](https://tsgsites.com.br)
-- 💬 [WhatsApp](https://wa.me/5531973534157)
-- 🔗 [Sistema Conexão](https://conexao.tsgsites.com.br)
-
----
-
-*Sistema proprietário. Proibida a venda, revenda ou distribuição sem autorização do autor. © TSG Soluções Digitais*
