@@ -1,7 +1,7 @@
 # 🤖 Agente IA WhatsApp — MicroSaaS Multi-Instância
 
 > Sistema de automação WhatsApp com IA, suporte a múltiplas instâncias e webhooks configuráveis.  
-> Inspirado na Evolution API. Desenvolvido por [TSG Soluções Digitais](https://tsgsites.com.br).
+> Inspirado na Evolution API. 
 
 ---
 
