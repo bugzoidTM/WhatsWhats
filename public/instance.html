@@ -279,7 +279,7 @@
 
     <!-- Abas -->
     <div class="tab-buttons">
-      <button class="tab-btn active" data-tab="groq">🔑 Groq (IA)</button>
+      <button class="tab-btn active" data-tab="groq">🔑 Provider IA</button>
       <button class="tab-btn" data-tab="fluxos">📋 Fluxos</button>
       <button class="tab-btn" data-tab="modelo">⚙️ Modelo</button>
       <button class="tab-btn" data-tab="webhooks">🔗 Webhooks</button>
@@ -287,27 +287,40 @@
       <button class="tab-btn" data-tab="historico">💬 Histórico</button>
     </div>
 
-    <!-- Aba Groq -->
+    <!-- Aba Provider IA -->
     <div id="tab-groq" class="tab-content ativo">
       <div class="card">
-        <h2>🔑 IA gratuita com Groq</h2>
+        <h2>🔑 Provider de IA</h2>
         <p class="dica">
-          O bot já responde com os <strong>fluxos</strong> configurados. Adicione a <strong>chave Groq</strong>
-          para a IA responder perguntas que não estão nos fluxos.
+          O bot responde primeiro pelos <strong>fluxos</strong>. Se nenhum fluxo bater, ele usa o provider de IA abaixo.
+          Além do Groq, você pode usar qualquer API compatível com OpenAI informando chave, Base URL e modelo.
         </p>
-        <a href="https://console.groq.com/keys" target="_blank" class="btn btn-success" style="margin-bottom:16px; text-decoration:none;">
-          🆓 Obter chave GRÁTIS no Groq
-        </a>
-        <p style="font-size:0.82rem; color:var(--text-muted); margin-bottom:14px;">(Cria conta → API Keys → Create API Key → Copiar)</p>
         <div class="form-group">
-          <label>Chave API (gsk_...)</label>
-          <input type="password" id="groqKey" placeholder="Cole sua chave Groq aqui">
+          <label>Provider</label>
+          <select id="aiProvider">
+            <option value="groq">Groq</option>
+            <option value="openai">OpenAI</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="together">Together AI</option>
+            <option value="gemini">Google Gemini (endpoint OpenAI compatível)</option>
+            <option value="custom">OpenAI compatível / custom</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Chave API</label>
+          <input type="password" id="groqKey" placeholder="Cole a chave API do provider selecionado">
+        </div>
+        <div class="form-group">
+          <label>Base URL</label>
+          <input type="url" id="aiBaseURL" placeholder="https://api.groq.com/openai/v1">
+          <p style="font-size:0.78rem; color:var(--text-muted); margin-top:5px;">Para provider custom, informe um endpoint compatível com /chat/completions.</p>
         </div>
         <div class="checkbox-group">
           <input type="checkbox" id="useAI" checked>
           <label for="useAI">Usar IA quando a pergunta não estiver nos fluxos</label>
         </div>
-        <button class="btn btn-primary" id="salvarGroq">💾 Salvar</button>
+        <button class="btn btn-primary" id="salvarGroq">💾 Salvar provider</button>
       </div>
     </div>
 
@@ -339,14 +352,22 @@
           <textarea id="promptSistema" rows="5" placeholder="Ex: Você é o assistente virtual da [SUA EMPRESA]..."></textarea>
         </div>
         <div class="form-group">
-          <label>Modelo Groq</label>
-          <select id="modeloGroq">
-            <option value="llama-3.1-8b-instant">Llama 3.1 8B (rápido, gratuito)</option>
-            <option value="llama-3.3-70b-versatile">Llama 3.3 70B (mais inteligente)</option>
-            <option value="llama3-8b-8192">Llama 3 8B</option>
-            <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
-            <option value="gemma2-9b-it">Gemma 2 9B</option>
-          </select>
+          <label>Modelo</label>
+          <input type="text" id="modeloGroq" list="modelosSugeridos" placeholder="Ex: llama-3.1-8b-instant, gpt-4o-mini, deepseek-chat">
+          <datalist id="modelosSugeridos">
+            <option value="llama-3.1-8b-instant">Groq — Llama 3.1 8B</option>
+            <option value="llama-3.3-70b-versatile">Groq — Llama 3.3 70B</option>
+            <option value="gpt-4o-mini">OpenAI — GPT-4o mini</option>
+            <option value="openai/gpt-4o-mini">OpenRouter — GPT-4o mini</option>
+            <option value="deepseek-chat">DeepSeek Chat</option>
+            <option value="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free">Together — Llama 3.3 70B</option>
+            <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+          </datalist>
+        </div>
+        <div class="form-group">
+          <label>Limite de resposta da IA (tokens)</label>
+          <input type="number" id="maxTokens" min="80" max="400" step="10" value="220">
+          <p style="font-size:0.78rem; color:var(--text-muted); margin-top:5px;">Use 160–220 para WhatsApp. Isso reduz respostas longas e confusas.</p>
         </div>
         <button class="btn btn-primary" id="salvarModelo">💾 Salvar</button>
       </div>
@@ -628,15 +649,38 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
       } catch (e) { toast('Erro ao salvar.', 'err'); }
     });
 
+    const AI_PROVIDER_PRESETS = {
+      groq: { baseURL: 'https://api.groq.com/openai/v1', model: 'llama-3.1-8b-instant' },
+      openai: { baseURL: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+      openrouter: { baseURL: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini' },
+      deepseek: { baseURL: 'https://api.deepseek.com', model: 'deepseek-chat' },
+      together: { baseURL: 'https://api.together.xyz/v1', model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free' },
+      gemini: { baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/', model: 'gemini-1.5-flash' },
+      custom: { baseURL: '', model: '' },
+    };
+
+    function applyProviderPreset(provider, onlyIfEmpty = false) {
+      const preset = AI_PROVIDER_PRESETS[provider] || AI_PROVIDER_PRESETS.groq;
+      if (!onlyIfEmpty || !$('aiBaseURL').value.trim()) $('aiBaseURL').value = preset.baseURL;
+      if (!onlyIfEmpty || !$('modeloGroq').value.trim()) $('modeloGroq').value = preset.model;
+    }
+
+    $('aiProvider').addEventListener('change', function () {
+      applyProviderPreset(this.value, false);
+    });
+
     // ── Carregar config ──
     async function carregarConfig() {
       try {
         const r = await fetch(API('/config/full'));
         const cfg = await r.json();
-        $('groqKey').value = cfg.groqApiKey || '';
+        $('aiProvider').value = cfg.aiProvider || 'groq';
+        $('groqKey').value = cfg.aiApiKey || cfg.groqApiKey || '';
+        $('aiBaseURL').value = cfg.aiBaseURL || AI_PROVIDER_PRESETS[$('aiProvider').value]?.baseURL || 'https://api.groq.com/openai/v1';
         $('useAI').checked = cfg.useAI !== false;
         $('promptSistema').value = cfg.promptSistema || '';
-        $('modeloGroq').value = cfg.model || 'llama-3.1-8b-instant';
+        $('modeloGroq').value = cfg.model || AI_PROVIDER_PRESETS[$('aiProvider').value]?.model || 'llama-3.1-8b-instant';
+        $('maxTokens').value = cfg.maxTokens || 220;
         $('humanoAtendeu').checked = !!cfg.humanoAtendeu;
         $('humano-box').classList.toggle('ativo', !!cfg.humanoAtendeu);
         if (cfg.knowledgeBase !== undefined) $('knowledgeBase').value = cfg.knowledgeBase || '';
@@ -648,10 +692,15 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
 
     // ── Salvar config global ──
     async function salvarConfig(extra = {}) {
+      const apiKey = $('groqKey').value.trim();
       const body = {
-        groqApiKey: $('groqKey').value.trim(),
+        aiProvider: $('aiProvider').value,
+        aiApiKey: apiKey,
+        aiBaseURL: $('aiBaseURL').value.trim(),
+        groqApiKey: apiKey, // compatibilidade com configs antigas
         useAI: $('useAI').checked,
-        model: $('modeloGroq').value,
+        model: $('modeloGroq').value.trim(),
+        maxTokens: Number($('maxTokens').value || 220),
         promptSistema: $('promptSistema').value.trim(),
         ...extra,
       };

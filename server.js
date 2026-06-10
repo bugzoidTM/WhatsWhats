@@ -65,9 +65,11 @@ if (isSetupMode()) {
 
 // =====================================
 // MAP DE INSTÂNCIAS (runtime)
-// estructura: name => { config, groqClient, whatsappClient, connected }
+// estructura: name => { config, aiClient, groqClient, whatsappClient, connected }
 // =====================================
 const instances = new Map();
+const conversationState = new Map();
+const pendingResponses = new Map();
 
 // =====================================
 // HELPERS
@@ -116,10 +118,14 @@ function validateInstanceName(name) {
 function defaultConfig(name) {
   return {
     name,
+    aiProvider: "groq",
+    aiApiKey: "",
+    aiBaseURL: "https://api.groq.com/openai/v1",
     groqApiKey: "",
     useAI: true,
     humanoAtendeu: false,
     model: "llama-3.1-8b-instant",
+    maxTokens: 220,
     promptSistema:
       "Você é o assistente virtual da empresa. Seja simpático, profissional e objetivo. " +
       "Responda dúvidas sobre horário, preços e serviços. Se não souber algo, peça para aguardar um atendente.",
@@ -152,13 +158,37 @@ function saveConfig(name, config) {
   fs.writeFileSync(configPath(name), JSON.stringify(config, null, 2), "utf8");
 }
 
+const AI_PROVIDER_PRESETS = {
+  groq: { label: "Groq", baseURL: "https://api.groq.com/openai/v1", defaultModel: "llama-3.1-8b-instant" },
+  openai: { label: "OpenAI", baseURL: "https://api.openai.com/v1", defaultModel: "gpt-4o-mini" },
+  openrouter: { label: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", defaultModel: "openai/gpt-4o-mini" },
+  deepseek: { label: "DeepSeek", baseURL: "https://api.deepseek.com", defaultModel: "deepseek-chat" },
+  together: { label: "Together AI", baseURL: "https://api.together.xyz/v1", defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" },
+  gemini: { label: "Google Gemini (OpenAI compatível)", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", defaultModel: "gemini-1.5-flash" },
+  custom: { label: "OpenAI compatível (custom)", baseURL: "", defaultModel: "" },
+};
+
+function normalizeAiConfig(config = {}) {
+  const provider = (config.aiProvider || "groq").trim().toLowerCase();
+  const preset = AI_PROVIDER_PRESETS[provider] || AI_PROVIDER_PRESETS.groq;
+  const legacyGroqKey = config.groqApiKey?.trim() || "";
+  const apiKey = config.aiApiKey?.trim() || legacyGroqKey;
+  const baseURL = (config.aiBaseURL || preset.baseURL || "").trim().replace(/\/+$/, "");
+  const model = (config.model || preset.defaultModel || "").trim();
+  return { provider, apiKey, baseURL, model };
+}
+
+function createAiClient(config = {}) {
+  const ai = normalizeAiConfig(config);
+  if (!ai.apiKey || !ai.baseURL) return null;
+  return new OpenAI({ apiKey: ai.apiKey, baseURL: ai.baseURL });
+}
+
 function getOrCreateInstance(name) {
   if (!instances.has(name)) {
     const config = loadConfig(name);
-    const groqClient = config.groqApiKey?.trim()
-      ? new OpenAI({ apiKey: config.groqApiKey, baseURL: "https://api.groq.com/openai/v1" })
-      : null;
-    instances.set(name, { config, groqClient, whatsappClient: null, connected: false, qrCode: null, initializing: false });
+    const aiClient = createAiClient(config);
+    instances.set(name, { config, aiClient, groqClient: aiClient, whatsappClient: null, connected: false, qrCode: null, initializing: false });
   }
   return instances.get(name);
 }
@@ -315,6 +345,25 @@ app.post("/api/auth/login", (req, res) => {
   return res.status(401).json({ error: "Senha incorreta." });
 });
 
+// POST /api/:instance/internal/test-attendant-notification — teste local-only da automação interna, sem expor ao dashboard público
+app.post("/api/:instance/internal/test-attendant-notification", validateInstance, async (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: "Endpoint permitido apenas via localhost." });
+
+  const { instance } = req.params;
+  const inst = getOrCreateInstance(instance);
+  const tipo = req.body?.tipo === "atendente" ? "atendente" : "sugestao_curso";
+  const texto = req.body?.texto || `[TESTE INTERNO] ${tipo} — ${new Date().toISOString()}`;
+  const fakeMsg = {
+    from: req.body?.from || "teste-interno@local",
+    notifyName: req.body?.pushName || "Teste interno Hermes",
+    getContact: async () => ({ pushname: req.body?.pushName || "Teste interno Hermes" }),
+  };
+
+  const result = await notificarAtendente(inst, instance, tipo, fakeMsg, texto);
+  if (!result?.ok) return res.status(500).json(result || { ok: false, error: "Falha desconhecida" });
+  res.json({ ok: true, destino: result.destino, messageId: result.messageId, tipo });
+});
+
 // ── Arquivos estáticos protegidos — aplicar requireAuth antes do static ──
 app.use(requireAuth, express.static(path.join(__dirname, "public")));
 
@@ -413,6 +462,11 @@ function validateInstance(req, res, next) {
   next();
 }
 
+function isLocalRequest(req) {
+  const ip = req.ip || req.socket?.remoteAddress || "";
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
 // GET /api/:instance/status
 app.get("/api/:instance/status", validateInstance, (req, res) => {
   const inst = instances.get(req.params.instance);
@@ -450,6 +504,7 @@ app.get("/api/:instance/config", validateInstance, (req, res) => {
   const inst = getOrCreateInstance(req.params.instance);
   const safe = { ...inst.config };
   if (safe.groqApiKey) safe.groqApiKey = safe.groqApiKey.substring(0, 8) + "***";
+  if (safe.aiApiKey) safe.aiApiKey = safe.aiApiKey.substring(0, 8) + "***";
   res.json(safe);
 });
 
@@ -463,11 +518,18 @@ app.get("/api/:instance/config/full", validateInstance, (req, res) => {
 app.post("/api/:instance/config", validateInstance, (req, res) => {
   const { instance } = req.params;
   const inst = getOrCreateInstance(instance);
-  inst.config = { ...inst.config, ...req.body };
+  const nextConfig = { ...inst.config, ...req.body };
+  const ai = normalizeAiConfig(nextConfig);
+  nextConfig.aiProvider = ai.provider;
+  nextConfig.aiBaseURL = ai.baseURL;
+  nextConfig.model = ai.model || nextConfig.model;
+  if (nextConfig.aiApiKey?.trim()) nextConfig.groqApiKey = nextConfig.aiApiKey;
+  else if (nextConfig.groqApiKey?.trim()) nextConfig.aiApiKey = nextConfig.groqApiKey;
+
+  inst.config = nextConfig;
   saveConfig(instance, inst.config);
-  if (inst.config.groqApiKey?.trim()) {
-    inst.groqClient = new OpenAI({ apiKey: inst.config.groqApiKey, baseURL: "https://api.groq.com/openai/v1" });
-  }
+  inst.aiClient = createAiClient(inst.config);
+  inst.groqClient = inst.aiClient; // compatibilidade com versões/configs antigas
   res.json({ ok: true });
 });
 
@@ -697,13 +759,135 @@ function initWhatsApp(instanceName, force = false) {
 // =====================================
 // LÓGICA DE MENSAGENS
 // =====================================
-async function respostaPorFluxo(flows, texto) {
-  const txt = texto.trim().toLowerCase();
+function normalizarTexto(texto) {
+  return (texto || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function textoContemQualquer(texto, termos) {
+  const txt = normalizarTexto(texto);
+  return termos.some((termo) => txt.includes(normalizarTexto(termo)));
+}
+
+function detectarIntencaoInterna(texto) {
+  const courseTerms = [
+    "sugerir curso",
+    "sugestão de curso",
+    "sugestao de curso",
+    "sugerir um novo curso",
+    "sugerir novo curso",
+    "novo curso para a plataforma",
+    "novo curso",
+    "curso para a plataforma",
+    "curso na plataforma",
+    "indicar curso",
+    "sugiro um curso",
+    "gostaria de sugerir",
+  ];
+  const humanTerms = [
+    "atendente",
+    "humano",
+    "falar com alguém",
+    "falar com alguem",
+    "falar com uma pessoa",
+    "pessoa real",
+    "suporte humano",
+    "quero falar com",
+    "me liga",
+    "ligação",
+    "ligacao",
+  ];
+
+  if (textoContemQualquer(texto, courseTerms)) return "sugestao_curso";
+  if (textoContemQualquer(texto, humanTerms)) return "atendente";
+  return null;
+}
+
+async function notificarAtendente(inst, instanceName, tipo, msg, texto) {
+  const numero = (inst.config.attendantWhatsApp || "5573999921633").replace(/\D/g, "");
+  if (!numero) return { ok: false, error: "attendantWhatsApp não configurado" };
+  if (!inst.whatsappClient || !inst.connected) return { ok: false, error: "WhatsApp da instância não está conectado" };
+
+  let destino = `${numero}@c.us`;
+  try {
+    const numberId = await inst.whatsappClient.getNumberId(numero);
+    if (numberId?._serialized) destino = numberId._serialized;
+  } catch (e) {
+    console.warn(`[${instanceName}] Não consegui resolver LID do atendente ${numero}, tentando ${destino}:`, e.message);
+  }
+  let contato = null;
+  try { contato = await msg.getContact(); } catch (_) {}
+
+  const nome = msg.notifyName || contato?.pushname || contato?.name || "não informado";
+  const jid = msg.from || "não informado";
+  const origem = jid.endsWith("@c.us") ? `+${jid.replace("@c.us", "")}` : jid;
+  const titulo = tipo === "sugestao_curso"
+    ? "📌 Sugestão de novo curso recebida"
+    : "🚨 Cliente pediu atendimento humano";
+
+  const textoInterno = [
+    titulo,
+    "",
+    `Instância: ${instanceName}`,
+    `Cliente: ${nome}`,
+    `Contato/JID: ${origem}`,
+    `Data: ${new Date().toLocaleString("pt-BR", { timeZone: "America/Bahia" })}`,
+    "",
+    "Mensagem do cliente:",
+    texto,
+  ].join("\n");
+
+  try {
+    const sent = await inst.whatsappClient.sendMessage(destino, textoInterno);
+    const messageId = sent?.id?._serialized || sent?.id?.id || "";
+    saveMessageEvent(instanceName, {
+      key: { remoteJid: destino, fromMe: true, id: messageId },
+      message: { conversation: textoInterno },
+      pushName: "Automação interna",
+    });
+    return { ok: true, destino, messageId, text: textoInterno };
+  } catch (e) {
+    console.error(`[${instanceName}] Erro ao notificar atendente interno:`, e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+async function respostaPorFluxo(flows, texto, state = {}) {
+  const txt = normalizarTexto(texto);
+  const sent = new Set(state.sentFlowIds || []);
+
   for (const flow of flows || []) {
+    if (flow.oncePerChat && sent.has(flow.id)) continue;
+
+    for (const p of flow.exactPhrases || []) {
+      if (txt === normalizarTexto(p)) return { resposta: flow.resposta, flow };
+    }
+
     for (const p of flow.palavras || []) {
-      if (txt.includes(p.toLowerCase()) || txt === p.toLowerCase()) return flow.resposta;
+      const key = normalizarTexto(p);
+      if (key && (txt.includes(key) || txt === key)) return { resposta: flow.resposta, flow };
     }
   }
+  return null;
+}
+
+function respostaContinuidadeSemIA(texto, state = {}) {
+  const txt = normalizarTexto(texto);
+  const sent = new Set(state.sentFlowIds || []);
+
+  if ((txt === "oi" || txt === "ola" || txt === "olá" || txt === "bom dia" || txt === "boa tarde" || txt === "boa noite") && sent.size > 0) {
+    return "Oi! 😊 Me diga como posso continuar te ajudando: trabalho pronto, trabalho exclusivo, pagamento, prazo ou outro tipo de trabalho?";
+  }
+
+  if ((txt === "ola apostileiros" || txt === "olá apostileiros") && sent.has("projeto_extensao_apostileiros_inicial")) {
+    return "Oi! Já te enviei as informações principais sobre projeto de extensão. Quer comprar o pronto, solicitar o exclusivo ou tirar alguma dúvida sobre prazo/pagamento?";
+  }
+
   return null;
 }
 
@@ -733,6 +917,101 @@ async function respostaPorIA(inst, texto) {
   }
 }
 
+function getResponseDelayMs(inst, texto) {
+  const base = Number(inst.config.responseDelayMs || 9000);
+  const normalized = normalizarTexto(texto);
+  if (normalized.length <= 2 || normalized === "?") return Math.max(base, 12000);
+  return Math.max(3000, Math.min(base, 20000));
+}
+
+function scheduleBufferedResponse(instanceName, msg, chat, texto) {
+  const inst = getOrCreateInstance(instanceName);
+  const key = `${instanceName}:${msg.from}`;
+  const existing = pendingResponses.get(key);
+  if (existing?.timer) clearTimeout(existing.timer);
+
+  const item = existing || { texts: [], firstAt: Date.now() };
+  item.texts.push(texto);
+  item.msg = msg;
+  item.chat = chat;
+  item.instanceName = instanceName;
+  item.updatedAt = Date.now();
+
+  const combined = item.texts.join("\n");
+  const delayMs = getResponseDelayMs(inst, combined);
+  item.timer = setTimeout(() => {
+    pendingResponses.delete(key);
+    processBufferedCustomerText(item).catch((e) => {
+      console.error(`[${instanceName}] Erro ao processar buffer de mensagem:`, e);
+      try { item.msg.reply("Ocorreu um erro. Tente novamente em instantes."); } catch (_) {}
+    });
+  }, delayMs);
+  pendingResponses.set(key, item);
+}
+
+async function processBufferedCustomerText(item) {
+  const { instanceName, msg, chat } = item;
+  const inst = getOrCreateInstance(instanceName);
+  const texto = item.texts.join("\n").trim();
+  if (!texto) return;
+
+  const textoNormalizado = normalizarTexto(texto);
+  const somentePontuacao = !textoNormalizado && /^[\s?!.…]+$/.test(texto);
+  if (somentePontuacao) {
+    console.log(`[${instanceName}] Ignorando mensagem isolada só com pontuação de ${msg.from}: ${JSON.stringify(texto)}`);
+    return;
+  }
+
+  const stateKey = `${instanceName}:${msg.from}`;
+  const state = conversationState.get(stateKey) || {};
+  let intencaoInterna = detectarIntencaoInterna(texto);
+  if (!intencaoInterna && state.pendingCourseSuggestion) {
+    intencaoInterna = "sugestao_curso";
+    state.pendingCourseSuggestion = false;
+  }
+  if (intencaoInterna === "sugestao_curso") {
+    await notificarAtendente(inst, instanceName, "sugestao_curso", msg, texto);
+    state.pendingCourseSuggestion = true;
+    state.updatedAt = Date.now();
+    conversationState.set(stateKey, state);
+  } else if (intencaoInterna === "atendente") {
+    await notificarAtendente(inst, instanceName, "atendente", msg, texto);
+    state.pendingHumanRequest = true;
+    state.updatedAt = Date.now();
+    conversationState.set(stateKey, state);
+  }
+
+  const typing = async () => { await delay(800); await chat.sendStateTyping(); await delay(1200); };
+
+  let resposta = respostaContinuidadeSemIA(texto, state);
+  let fluxoMatch = null;
+  if (!resposta) {
+    fluxoMatch = await respostaPorFluxo(inst.config.flows, texto, state);
+    resposta = fluxoMatch?.resposta || null;
+  }
+  if (fluxoMatch?.flow?.id) {
+    state.sentFlowIds = Array.from(new Set([...(state.sentFlowIds || []), fluxoMatch.flow.id]));
+    state.lastFlowId = fluxoMatch.flow.id;
+    state.updatedAt = Date.now();
+    conversationState.set(stateKey, state);
+  }
+  if (!resposta) resposta = respostaParaTextoSolto(texto);
+  if (!resposta && inst.config.useAI) resposta = await respostaPorIA(inst, texto);
+  if (!resposta) resposta = "Me envie mais detalhes para eu te orientar melhor.";
+
+  await typing();
+  await msg.reply(resposta);
+
+  const outgoingPayload = {
+    key: { remoteJid: msg.from, fromMe: true },
+    message: { conversation: resposta },
+    messageType: "conversation",
+    messageTimestamp: Math.floor(Date.now() / 1000),
+  };
+  await dispatchWebhook(instanceName, "messages.upsert", outgoingPayload);
+  saveMessageEvent(instanceName, outgoingPayload);
+}
+
 async function handleMessage(instanceName, msg) {
   try {
     const inst = getOrCreateInstance(instanceName);
@@ -742,7 +1021,7 @@ async function handleMessage(instanceName, msg) {
     const texto = msg.body?.trim();
     if (!texto) return;
 
-    // Webhook — sempre dispara ao receber mensagem, independente do modo humano
+    // Webhook/histórico — sempre registra ao receber, independente do modo humano/debounce
     const incomingPayload = {
       key: { remoteJid: msg.from, fromMe: false, id: msg.id?._serialized },
       message: { conversation: texto },
@@ -753,27 +1032,8 @@ async function handleMessage(instanceName, msg) {
     await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
     saveMessageEvent(instanceName, incomingPayload);
 
-    // Humano atendendo → bot NÃO responde, mas o webhook já foi disparado acima
     if (inst.config.humanoAtendeu) return;
-
-    const typing = async () => { await delay(800); await chat.sendStateTyping(); await delay(1200); };
-
-    let resposta = await respostaPorFluxo(inst.config.flows, texto);
-    if (!resposta && inst.config.useAI) resposta = await respostaPorIA(inst, texto);
-    if (!resposta) resposta = "Desculpe, não entendi. Digite 'menu' para ver as opções.";
-
-    await typing();
-    await msg.reply(resposta);
-
-    // Webhook — resposta enviada pelo bot
-    const outgoingPayload = {
-      key: { remoteJid: msg.from, fromMe: true },
-      message: { conversation: resposta },
-      messageType: "conversation",
-      messageTimestamp: Math.floor(Date.now() / 1000),
-    };
-    await dispatchWebhook(instanceName, "messages.upsert", outgoingPayload);
-    saveMessageEvent(instanceName, outgoingPayload);
+    scheduleBufferedResponse(instanceName, msg, chat, texto);
   } catch (e) {
     console.error(`[${instanceName}] Erro ao processar mensagem:`, e);
     try { await msg.reply("Ocorreu um erro. Tente novamente em instantes."); } catch (_) {}
