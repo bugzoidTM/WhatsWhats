@@ -14,6 +14,7 @@ RUN apk add --no-cache \
     ca-certificates \
     ttf-freefont \
     font-noto-emoji \
+    ffmpeg \
     && rm -rf /var/cache/apk/*
 
 # Diz ao Puppeteer para usar o Chromium do sistema (não baixar o bundled)

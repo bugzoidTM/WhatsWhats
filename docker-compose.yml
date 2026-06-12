@@ -33,6 +33,10 @@ services:
       - AUTH_FILE_PATH=/app/auth_data/auth.json
       # IMPORTANTE: Defina um valor seguro e aleatório abaixo
       - SESSION_SECRET=${SESSION_SECRET:-chavewhats}
+      - LOCAL_STT_URL=http://whisper-stt:8000/transcribe
+      - KOKORO_TTS_URL=http://kokoro:8880/v1/audio/speech
+      - KOKORO_TTS_VOICE=pf_dora
+      - KOKORO_TTS_MODEL=kokoro
 
     volumes:
       # Persistência das sessões WhatsApp (QR codes escaneados)
@@ -81,6 +85,27 @@ services:
         #- traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
         #- traefik.http.middlewares.redirect-to-https.redirectscheme.permanent=true
 
+  whisper-stt:
+    image: nutef/whisper-stt:latest
+    networks:
+      Nutef:
+        aliases:
+          - whisper-stt
+    environment:
+      - WHISPER_MODEL=small
+      - WHISPER_COMPUTE_TYPE=int8
+      - HF_HOME=/models/huggingface
+    volumes:
+      - agente_ia_whisper_models:/models
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: any
+
 # ──────────────────────────────────────────────────────
 # Volumes persistentes (dados fora do container)
 # ──────────────────────────────────────────────────────
@@ -89,6 +114,8 @@ volumes:
     name: agente_ia_instances
   agente_ia_auth:
     name: agente_ia_auth
+  agente_ia_whisper_models:
+    name: agente_ia_whisper_models
 
 # ──────────────────────────────────────────────────────
 # Rede externa Nutef (já existente no Swarm)

@@ -10,10 +10,12 @@ const http = require("http");
 const { Server } = require("socket.io");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
+const { spawn } = require("child_process");
 const crypto = require("crypto");
 const session = require("express-session");
 const QRCode = require("qrcode");
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const OpenAI = require("openai");
 
 // =====================================
@@ -24,6 +26,10 @@ const HOST = process.env.LISTEN_HOST || "0.0.0.0";
 const INSTANCES_DIR = path.join(__dirname, "instances");
 const AUTH_FILE = process.env.AUTH_FILE_PATH || path.join(__dirname, "auth.json");
 const RESERVED_NAMES = ["instances", "api", "socket.io", "public", "login", "setup"];
+const LOCAL_STT_URL = process.env.LOCAL_STT_URL || "http://whisper-stt:8000/transcribe";
+const KOKORO_TTS_URL = process.env.KOKORO_TTS_URL || "http://kokoro:8880/v1/audio/speech";
+const KOKORO_TTS_VOICE = process.env.KOKORO_TTS_VOICE || "pf_dora";
+const KOKORO_TTS_MODEL = process.env.KOKORO_TTS_MODEL || "kokoro";
 
 if (!fs.existsSync(INSTANCES_DIR)) fs.mkdirSync(INSTANCES_DIR, { recursive: true });
 
@@ -364,6 +370,32 @@ app.post("/api/:instance/internal/test-attendant-notification", validateInstance
   res.json({ ok: true, destino: result.destino, messageId: result.messageId, tipo });
 });
 
+// POST /api/:instance/internal/test-attendant-audio — envia áudio local TTS para o WhatsApp do atendente
+app.post("/api/:instance/internal/test-attendant-audio", validateInstance, async (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: "Endpoint permitido apenas via localhost." });
+
+  const { instance } = req.params;
+  const inst = getOrCreateInstance(instance);
+  const destinoInfo = await resolverDestinoAtendente(inst, instance);
+  if (!destinoInfo.ok) return res.status(500).json(destinoInfo);
+
+  const texto = req.body?.texto || "Teste de resposta em áudio do agente Apostileiros. A transcrição e a voz estão sendo processadas localmente, sem API externa de transcrição.";
+  try {
+    const audio = await sintetizarAudioResposta(instance, texto);
+    const sent = await inst.whatsappClient.sendMessage(destinoInfo.destino, audio, { sendAudioAsVoice: true });
+    const messageId = sent?.id?._serialized || sent?.id?.id || "";
+    saveMessageEvent(instance, {
+      key: { remoteJid: destinoInfo.destino, fromMe: true, id: messageId },
+      message: { conversation: `[teste áudio atendente] ${texto}` },
+      pushName: "Automação interna",
+    });
+    res.json({ ok: true, destino: destinoInfo.destino, messageId, voice: KOKORO_TTS_VOICE });
+  } catch (e) {
+    console.error(`[${instance}] Erro no teste de áudio para atendente:`, e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ── Arquivos estáticos protegidos — aplicar requireAuth antes do static ──
 app.use(requireAuth, express.static(path.join(__dirname, "public")));
 
@@ -641,12 +673,14 @@ function cleanChromeLocks(instanceName) {
   const authDataPath = path.join(instanceDir(instanceName), "auth");
   const sessionPath = path.join(authDataPath, `session-${instanceName}`);
   if (fs.existsSync(sessionPath)) {
-    const lockFiles = ["SingletonLock", "SingletonCookie", "lock"];
+    const lockFiles = ["SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort", "lock"];
     lockFiles.forEach(file => {
       const lockPath = path.join(sessionPath, file);
-      if (fs.existsSync(lockPath)) {
+      let exists = false;
+      try { exists = fs.existsSync(lockPath) || fs.lstatSync(lockPath).isSymbolicLink(); } catch (_) {}
+      if (exists) {
         try {
-          fs.unlinkSync(lockPath);
+          fs.rmSync(lockPath, { force: true });
           console.log(`[${instanceName}] Lock file removido: ${lockPath}`);
         } catch (e) {
           console.error(`[${instanceName}] Erro ao remover lock file ${lockPath}:`, e.message);
@@ -808,7 +842,7 @@ function detectarIntencaoInterna(texto) {
   return null;
 }
 
-async function notificarAtendente(inst, instanceName, tipo, msg, texto) {
+async function resolverDestinoAtendente(inst, instanceName) {
   const numero = (inst.config.attendantWhatsApp || "5573999921633").replace(/\D/g, "");
   if (!numero) return { ok: false, error: "attendantWhatsApp não configurado" };
   if (!inst.whatsappClient || !inst.connected) return { ok: false, error: "WhatsApp da instância não está conectado" };
@@ -820,6 +854,14 @@ async function notificarAtendente(inst, instanceName, tipo, msg, texto) {
   } catch (e) {
     console.warn(`[${instanceName}] Não consegui resolver LID do atendente ${numero}, tentando ${destino}:`, e.message);
   }
+  return { ok: true, destino };
+}
+
+async function notificarAtendente(inst, instanceName, tipo, msg, texto, options = {}) {
+  const destinoInfo = await resolverDestinoAtendente(inst, instanceName);
+  if (!destinoInfo.ok) return destinoInfo;
+  const destino = destinoInfo.destino;
+
   let contato = null;
   try { contato = await msg.getContact(); } catch (_) {}
 
@@ -828,7 +870,19 @@ async function notificarAtendente(inst, instanceName, tipo, msg, texto) {
   const origem = jid.endsWith("@c.us") ? `+${jid.replace("@c.us", "")}` : jid;
   const titulo = tipo === "sugestao_curso"
     ? "📌 Sugestão de novo curso recebida"
-    : "🚨 Cliente pediu atendimento humano";
+    : tipo === "midia_cliente"
+      ? "📎 Cliente enviou mídia/arquivo para análise"
+      : "🚨 Cliente pediu atendimento humano";
+
+  const detalhesMidia = options.mediaInfo
+    ? [
+        "",
+        "Mídia/arquivo:",
+        `Tipo: ${options.mediaInfo.tipo || "não informado"}`,
+        `MIME: ${options.mediaInfo.mimetype || "não informado"}`,
+        options.mediaInfo.filename ? `Arquivo: ${options.mediaInfo.filename}` : null,
+      ].filter(Boolean)
+    : [];
 
   const textoInterno = [
     titulo,
@@ -840,6 +894,7 @@ async function notificarAtendente(inst, instanceName, tipo, msg, texto) {
     "",
     "Mensagem do cliente:",
     texto,
+    ...detalhesMidia,
   ].join("\n");
 
   try {
@@ -850,11 +905,275 @@ async function notificarAtendente(inst, instanceName, tipo, msg, texto) {
       message: { conversation: textoInterno },
       pushName: "Automação interna",
     });
-    return { ok: true, destino, messageId, text: textoInterno };
+
+    let mediaMessageId = "";
+    if (options.media) {
+      try {
+        const mediaCaption = `Arquivo enviado pelo cliente ${nome} (${origem}) para análise.`;
+        const sentMedia = await inst.whatsappClient.sendMessage(destino, options.media, { caption: mediaCaption });
+        mediaMessageId = sentMedia?.id?._serialized || sentMedia?.id?.id || "";
+        saveMessageEvent(instanceName, {
+          key: { remoteJid: destino, fromMe: true, id: mediaMessageId },
+          message: { conversation: `[mídia encaminhada ao atendente] ${options.mediaInfo?.mimetype || ""}`.trim() },
+          pushName: "Automação interna",
+        });
+      } catch (e) {
+        console.error(`[${instanceName}] Notificação textual enviada, mas falhou ao encaminhar mídia ao atendente:`, e.message);
+      }
+    }
+
+    return { ok: true, destino, messageId, mediaMessageId, text: textoInterno };
   } catch (e) {
     console.error(`[${instanceName}] Erro ao notificar atendente interno:`, e.message);
     return { ok: false, error: e.message };
   }
+}
+
+function classificarMidiaCliente(msg, media) {
+  const mimetype = media?.mimetype || "";
+  const filename = media?.filename || "";
+  const tipoMsg = msg.type || "media";
+  const isImage = tipoMsg === "image" || mimetype.startsWith("image/");
+  const isAudio = ["audio", "ptt", "voice"].includes(tipoMsg) || mimetype.startsWith("audio/");
+  const isDocument = tipoMsg === "document"
+    || mimetype === "application/pdf"
+    || /officedocument\.wordprocessingml\.document|msword/i.test(mimetype)
+    || /\.(pdf|docx?|odt)$/i.test(filename);
+  return {
+    tipo: isAudio ? "audio" : isImage ? "imagem" : isDocument ? "documento" : tipoMsg,
+    mimetype,
+    filename,
+    isImage,
+    isAudio,
+    isDocument,
+  };
+}
+
+async function transcreverAudioLocal(instanceName, media) {
+  if (!media?.data) throw new Error("Áudio recebido sem conteúdo para transcrição.");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.LOCAL_STT_TIMEOUT_MS || 120000));
+  try {
+    const response = await fetch(LOCAL_STT_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        audio_base64: media.data,
+        mimetype: media.mimetype || "audio/ogg",
+        filename: media.filename || "audio.ogg",
+        language: "pt",
+      }),
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    if (!response.ok) throw new Error(`STT local HTTP ${response.status}: ${raw.slice(0, 500)}`);
+    const data = JSON.parse(raw);
+    const text = String(data.text || "").trim();
+    if (!text) throw new Error("STT local não retornou texto.");
+    console.log(`[${instanceName}] Áudio transcrito localmente: ${JSON.stringify(text.slice(0, 180))}`);
+    return text;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function limitarTextoParaAudio(texto) {
+  const clean = String(texto || "").replace(/[*_~`#>\[\]()]/g, "").replace(/\s+/g, " ").trim();
+  if (clean.length <= 850) return clean;
+  return clean.slice(0, 820).replace(/\s+\S*$/, "") + ". Posso continuar por texto se quiser.";
+}
+
+function runFfmpeg(args, timeoutMs = 90000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("ffmpeg excedeu tempo limite"));
+    }, timeoutMs);
+
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve(true);
+      reject(new Error(`ffmpeg falhou (${code}): ${stderr.slice(-1000)}`));
+    });
+  });
+}
+
+async function converterMp3ParaOggOpus(buffer, instanceName) {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "apostileiros-audio-"));
+  const inputPath = path.join(dir, "tts.mp3");
+  const outputPath = path.join(dir, "resposta.ogg");
+  try {
+    await fs.promises.writeFile(inputPath, buffer);
+    await runFfmpeg([
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-i", inputPath,
+      "-vn", "-ac", "1", "-ar", "48000",
+      "-c:a", "libopus", "-b:a", "32k", "-vbr", "on", "-application", "voip",
+      outputPath,
+    ]);
+    const opus = await fs.promises.readFile(outputPath);
+    if (opus.length < 500) throw new Error("conversão OGG/Opus gerou arquivo pequeno demais");
+    console.log(`[${instanceName}] Áudio convertido para OGG/Opus compatível com WhatsApp (${opus.length} bytes).`);
+    return opus;
+  } finally {
+    fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function sintetizarAudioResposta(instanceName, texto) {
+  const input = limitarTextoParaAudio(texto);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.KOKORO_TTS_TIMEOUT_MS || 90000));
+  try {
+    const response = await fetch(KOKORO_TTS_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "accept": "audio/mpeg",
+        "x-raw-response": "true",
+      },
+      body: JSON.stringify({
+        model: KOKORO_TTS_MODEL,
+        voice: KOKORO_TTS_VOICE,
+        input,
+        response_format: "mp3",
+        speed: 0.95,
+        lang_code: "p",
+      }),
+      signal: controller.signal,
+    });
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    if (!response.ok) throw new Error(`Kokoro TTS HTTP ${response.status}: ${buffer.toString("utf8").slice(0, 500)}`);
+    if (buffer.length < 500) throw new Error("Kokoro TTS retornou áudio vazio/pequeno demais.");
+    const opusBuffer = await converterMp3ParaOggOpus(buffer, instanceName);
+    console.log(`[${instanceName}] Áudio TTS gerado localmente (${buffer.length} bytes MP3) e preparado como OGG/Opus (${opusBuffer.length} bytes, voz ${KOKORO_TTS_VOICE}).`);
+    return new MessageMedia("audio/ogg; codecs=opus", opusBuffer.toString("base64"), "resposta-apostileiros.ogg");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function responderComAudio(instanceName, msg, resposta) {
+  const audio = await sintetizarAudioResposta(instanceName, resposta);
+  await msg.reply(audio, undefined, { sendAudioAsVoice: true });
+}
+
+async function handleCustomerAudio(instanceName, inst, msg, chat, media, mediaInfo) {
+  const textoLegenda = (msg.body || msg.caption || "").trim();
+  const incomingPayload = {
+    key: { remoteJid: msg.from, fromMe: false, id: msg.id?._serialized },
+    message: { conversation: textoLegenda || "[áudio recebido]" },
+    messageType: "audio",
+    messageTimestamp: msg.timestamp,
+    pushName: msg.notifyName || "",
+  };
+  await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
+  saveMessageEvent(instanceName, incomingPayload);
+
+  if (inst.config.humanoAtendeu) return;
+
+  await chat.sendStateRecording();
+  let transcricao;
+  try {
+    transcricao = await transcreverAudioLocal(instanceName, media);
+  } catch (e) {
+    console.error(`[${instanceName}] Falha na transcrição local do áudio:`, e.message);
+    const fallback = "Não consegui entender esse áudio com segurança. Pode reenviar falando mais perto do microfone ou mandar por texto?";
+    await msg.reply(fallback);
+    const outgoingPayload = {
+      key: { remoteJid: msg.from, fromMe: true },
+      message: { conversation: fallback },
+      messageType: "conversation",
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    };
+    await dispatchWebhook(instanceName, "messages.upsert", outgoingPayload);
+    saveMessageEvent(instanceName, outgoingPayload);
+    return;
+  }
+
+  const textoParaAgente = textoLegenda
+    ? `${textoLegenda}\n\nTranscrição do áudio: ${transcricao}`
+    : transcricao;
+  const resposta = await gerarRespostaParaTexto(instanceName, inst, msg, textoParaAgente);
+
+  await delay(700);
+  await chat.sendStateRecording();
+  try {
+    await responderComAudio(instanceName, msg, resposta);
+  } catch (e) {
+    console.error(`[${instanceName}] Falha ao enviar resposta em áudio; enviando texto:`, e.message);
+    await msg.reply(resposta);
+  }
+
+  const outgoingPayload = {
+    key: { remoteJid: msg.from, fromMe: true },
+    message: { conversation: `[resposta em áudio] ${resposta}` },
+    messageType: "audio",
+    messageTimestamp: Math.floor(Date.now() / 1000),
+  };
+  await dispatchWebhook(instanceName, "messages.upsert", outgoingPayload);
+  saveMessageEvent(instanceName, outgoingPayload);
+}
+
+async function handleCustomerMedia(instanceName, inst, msg, chat) {
+  let media = null;
+  let mediaInfo = { tipo: msg.type || "media", mimetype: "", filename: "" };
+  const texto = (msg.body || msg.caption || "").trim();
+
+  try {
+    media = await msg.downloadMedia();
+    mediaInfo = classificarMidiaCliente(msg, media);
+  } catch (e) {
+    console.error(`[${instanceName}] Erro ao baixar mídia recebida de ${msg.from}:`, e.message);
+  }
+
+  if (mediaInfo.isAudio) {
+    await handleCustomerAudio(instanceName, inst, msg, chat, media, mediaInfo);
+    return;
+  }
+
+  const incomingPayload = {
+    key: { remoteJid: msg.from, fromMe: false, id: msg.id?._serialized },
+    message: { conversation: texto || `[${mediaInfo.tipo} recebida]` },
+    messageType: mediaInfo.tipo,
+    messageTimestamp: msg.timestamp,
+    pushName: msg.notifyName || "",
+  };
+  await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
+  saveMessageEvent(instanceName, incomingPayload);
+
+  const pergunta = texto || "Cliente enviou mídia/arquivo sem texto.";
+  await notificarAtendente(inst, instanceName, "midia_cliente", msg, pergunta, { media, mediaInfo });
+
+  if (inst.config.humanoAtendeu) return;
+
+  const resposta = mediaInfo.isImage
+    ? "Recebi a foto e encaminhei para a equipe verificar com segurança se temos esse item/serviço. Se puder, envie também qualquer detalhe que apareça na imagem ou o nome do que você procura."
+    : mediaInfo.isDocument
+      ? "Recebi o arquivo e encaminhei para a equipe analisar. Se puder, informe também o curso/faculdade, tipo de trabalho e prazo final para agilizar o retorno."
+      : "Recebi o anexo e encaminhei para a equipe analisar. Se puder, envie também uma mensagem explicando o que você precisa.";
+
+  await delay(800);
+  await chat.sendStateTyping();
+  await delay(1200);
+  await msg.reply(resposta);
+
+  const outgoingPayload = {
+    key: { remoteJid: msg.from, fromMe: true },
+    message: { conversation: resposta },
+    messageType: "conversation",
+    messageTimestamp: Math.floor(Date.now() / 1000),
+  };
+  await dispatchWebhook(instanceName, "messages.upsert", outgoingPayload);
+  saveMessageEvent(instanceName, outgoingPayload);
 }
 
 async function respostaPorFluxo(flows, texto, state = {}) {
@@ -891,8 +1210,49 @@ function respostaContinuidadeSemIA(texto, state = {}) {
   return null;
 }
 
+function respostaContextualPorEstado(texto, state = {}) {
+  const txt = normalizarTexto(texto);
+  const lastFlow = state.lastFlowId || "";
+
+  const contextoOrcamento = [
+    "trabalho_academico_orcamento_inteligente",
+    "relatorio_estagio_supervisionado",
+    "6",
+    "9",
+  ].includes(lastFlow);
+
+  if (contextoOrcamento) {
+    const temCursoOuFaculdade = /(curso|licenciatura|bacharelado|pedagogia|administracao|enfermagem|faculdade|anhanguera|unopar|pitagoras|semestre)/i.test(txt);
+    if (temCursoOuFaculdade) {
+      return "Perfeito, já ajuda. 😊\n\nPara fechar a análise do trabalho, envie também:\n• tipo de trabalho/atividade e tema\n• prazo final de postagem\n• orientações ou prints do AVA, se tiver\n\nCom isso a equipe avalia se é modelo pronto ou exclusivo e passa valor/prazo.";
+    }
+  }
+
+  return null;
+}
+
+function respostaParaTextoSolto(texto) {
+  const txt = normalizarTexto(texto);
+  if (!txt) return null;
+
+  if (/^(oi|ola|olá|bom dia|boa tarde|boa noite|menu)$/.test(txt)) return null;
+
+  if (txt.length <= 24 && txt.split(" ").length <= 3) {
+    return "Não entendi exatamente o que você precisa. 😊\n\nVocê procura trabalho pronto, trabalho exclusivo/orçamento, certificado/ACO, prazo ou pagamento?";
+  }
+
+  const termosTrabalho = ["trabalho", "atividade", "portfolio", "portifolio", "projeto", "relatorio", "estagio", "tcc", "abnt", "faculdade", "ava"];
+  if (termosTrabalho.some((termo) => txt.includes(termo))) {
+    return "Podemos ajudar com modelos prontos e trabalhos exclusivos sob encomenda.\n\nPara orientar melhor, envie: curso/faculdade, tipo de trabalho, tema ou disciplina, prazo final e orientações do AVA.";
+  }
+
+  return null;
+}
+
 async function respostaPorIA(inst, texto) {
-  if (!inst.groqClient || !inst.config.groqApiKey) return null;
+  const aiClient = inst.aiClient || inst.groqClient;
+  const ai = normalizeAiConfig(inst.config || {});
+  if (!aiClient || !ai.apiKey) return null;
   try {
     const sysContent = [
       inst.config.promptSistema || "Você é um assistente prestativo.",
@@ -901,18 +1261,18 @@ async function respostaPorIA(inst, texto) {
         : ""
     ].join("");
 
-    const completion = await inst.groqClient.chat.completions.create({
-      model: inst.config.model || "llama-3.1-8b-instant",
+    const completion = await aiClient.chat.completions.create({
+      model: ai.model || inst.config.model || "llama-3.1-8b-instant",
       messages: [
         { role: "system", content: sysContent },
         { role: "user", content: texto },
       ],
-      max_tokens: 500,
-      temperature: 0.7,
+      max_tokens: Number(inst.config.maxTokens || 180),
+      temperature: 0.35,
     });
     return completion.choices?.[0]?.message?.content?.trim() || null;
   } catch (e) {
-    console.error("Erro Groq:", e.message);
+    console.error("Erro IA:", e.message);
     return null;
   }
 }
@@ -949,19 +1309,7 @@ function scheduleBufferedResponse(instanceName, msg, chat, texto) {
   pendingResponses.set(key, item);
 }
 
-async function processBufferedCustomerText(item) {
-  const { instanceName, msg, chat } = item;
-  const inst = getOrCreateInstance(instanceName);
-  const texto = item.texts.join("\n").trim();
-  if (!texto) return;
-
-  const textoNormalizado = normalizarTexto(texto);
-  const somentePontuacao = !textoNormalizado && /^[\s?!.…]+$/.test(texto);
-  if (somentePontuacao) {
-    console.log(`[${instanceName}] Ignorando mensagem isolada só com pontuação de ${msg.from}: ${JSON.stringify(texto)}`);
-    return;
-  }
-
+async function gerarRespostaParaTexto(instanceName, inst, msg, texto) {
   const stateKey = `${instanceName}:${msg.from}`;
   const state = conversationState.get(stateKey) || {};
   let intencaoInterna = detectarIntencaoInterna(texto);
@@ -981,9 +1329,8 @@ async function processBufferedCustomerText(item) {
     conversationState.set(stateKey, state);
   }
 
-  const typing = async () => { await delay(800); await chat.sendStateTyping(); await delay(1200); };
-
   let resposta = respostaContinuidadeSemIA(texto, state);
+  if (!resposta) resposta = respostaContextualPorEstado(texto, state);
   let fluxoMatch = null;
   if (!resposta) {
     fluxoMatch = await respostaPorFluxo(inst.config.flows, texto, state);
@@ -998,6 +1345,24 @@ async function processBufferedCustomerText(item) {
   if (!resposta) resposta = respostaParaTextoSolto(texto);
   if (!resposta && inst.config.useAI) resposta = await respostaPorIA(inst, texto);
   if (!resposta) resposta = "Me envie mais detalhes para eu te orientar melhor.";
+  return resposta;
+}
+
+async function processBufferedCustomerText(item) {
+  const { instanceName, msg, chat } = item;
+  const inst = getOrCreateInstance(instanceName);
+  const texto = item.texts.join("\n").trim();
+  if (!texto) return;
+
+  const textoNormalizado = normalizarTexto(texto);
+  const somentePontuacao = !textoNormalizado && /^[\s?!.…]+$/.test(texto);
+  if (somentePontuacao) {
+    console.log(`[${instanceName}] Ignorando mensagem isolada só com pontuação de ${msg.from}: ${JSON.stringify(texto)}`);
+    return;
+  }
+
+  const typing = async () => { await delay(800); await chat.sendStateTyping(); await delay(1200); };
+  const resposta = await gerarRespostaParaTexto(instanceName, inst, msg, texto);
 
   await typing();
   await msg.reply(resposta);
@@ -1018,6 +1383,13 @@ async function handleMessage(instanceName, msg) {
     if (!msg.from || msg.from.endsWith("@g.us")) return;
     const chat = await msg.getChat();
     if (chat.isGroup) return;
+
+    // Mídias e arquivos não devem cair no fluxo textual/IA comum: encaminha para análise humana.
+    if (msg.hasMedia) {
+      await handleCustomerMedia(instanceName, inst, msg, chat);
+      return;
+    }
+
     const texto = msg.body?.trim();
     if (!texto) return;
 
