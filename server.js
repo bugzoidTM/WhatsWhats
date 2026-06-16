@@ -23,7 +23,7 @@ const OpenAI = require("openai");
 // =====================================
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.LISTEN_HOST || "0.0.0.0";
-const INSTANCES_DIR = path.join(__dirname, "instances");
+const INSTANCES_DIR = process.env.INSTANCES_DIR || path.join(__dirname, "instances");
 const AUTH_FILE = process.env.AUTH_FILE_PATH || path.join(__dirname, "auth.json");
 const RESERVED_NAMES = ["instances", "api", "socket.io", "public", "login", "setup"];
 const LOCAL_STT_URL = process.env.LOCAL_STT_URL || "http://whisper-stt:8000/transcribe";
@@ -82,7 +82,140 @@ const pendingResponses = new Map();
 // =====================================
 const instanceDir = (name) => path.join(INSTANCES_DIR, name);
 const configPath  = (name) => path.join(instanceDir(name), "config.json");
+const crmPath     = (name) => path.join(instanceDir(name), "crm.json");
 const delay       = (ms)   => new Promise((r) => setTimeout(r, ms));
+
+function readJsonFileSafe(filePath, fallback) {
+  try {
+    if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (e) {
+    console.error(`Erro ao ler JSON ${filePath}:`, e.message);
+  }
+  return fallback;
+}
+
+function writeJsonFileAtomic(filePath, data) {
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
+  fs.renameSync(tmp, filePath);
+}
+
+function normalizeCustomerJid(remoteJid = "") {
+  const jid = String(remoteJid || "").trim();
+  if (!jid || jid.endsWith("@g.us")) return "";
+  return jid;
+}
+
+function phoneFromJid(remoteJid = "") {
+  const jid = String(remoteJid || "");
+  if (jid.endsWith("@c.us") || jid.endsWith("@s.whatsapp.net")) return jid.split("@")[0].replace(/\D/g, "");
+  return jid.replace(/\D/g, "");
+}
+
+function loadCrm(instanceName) {
+  const data = readJsonFileSafe(crmPath(instanceName), { contacts: [] });
+  const contacts = Array.isArray(data) ? data : Array.isArray(data.contacts) ? data.contacts : [];
+  return {
+    version: 1,
+    updatedAt: data.updatedAt || null,
+    contacts: contacts.filter((c) => c && c.remoteJid),
+  };
+}
+
+function saveCrm(instanceName, crm) {
+  const dir = instanceDir(instanceName);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  writeJsonFileAtomic(crmPath(instanceName), {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    contacts: crm.contacts || [],
+  });
+}
+
+function upsertCrmContact(instanceName, record) {
+  const remoteJid = normalizeCustomerJid(record.remoteJid);
+  if (!remoteJid || record.fromMe) return null;
+
+  const nowIso = new Date(record.timestamp || Date.now()).toISOString();
+  const crm = loadCrm(instanceName);
+  const idx = crm.contacts.findIndex((c) => c.remoteJid === remoteJid);
+  const current = idx >= 0 ? crm.contacts[idx] : {};
+  const text = String(record.text || "").trim();
+  const next = {
+    remoteJid,
+    phone: current.phone || phoneFromJid(remoteJid),
+    name: record.pushName || current.name || "",
+    firstSeenAt: current.firstSeenAt || nowIso,
+    lastSeenAt: nowIso,
+    messageCount: Number(current.messageCount || 0) + 1,
+    lastMessage: text.slice(0, 500),
+    lastMessageAt: nowIso,
+    lastMessageType: record.messageType || current.lastMessageType || "conversation",
+    status: current.status || "novo",
+    tags: Array.isArray(current.tags) ? current.tags : [],
+    notes: current.notes || "",
+    updatedAt: new Date().toISOString(),
+    createdAt: current.createdAt || nowIso,
+  };
+  if (idx >= 0) crm.contacts[idx] = next;
+  else crm.contacts.push(next);
+  crm.contacts.sort((a, b) => new Date(b.lastSeenAt || 0) - new Date(a.lastSeenAt || 0));
+  saveCrm(instanceName, crm);
+  if (typeof io !== "undefined" && io) io.to(instanceName).emit("crm_contact_upserted", next);
+  return next;
+}
+
+function rebuildCrmFromMessages(instanceName) {
+  const filePath = path.join(instanceDir(instanceName), "messages.jsonl");
+  const existing = loadCrm(instanceName);
+  const manual = new Map(existing.contacts.map((c) => [c.remoteJid, {
+    status: c.status || "novo",
+    tags: Array.isArray(c.tags) ? c.tags : [],
+    notes: c.notes || "",
+  }]));
+  const byJid = new Map();
+  if (!fs.existsSync(filePath)) return existing;
+  const lines = fs.readFileSync(filePath, "utf8").split("\n").filter(Boolean);
+  for (const line of lines) {
+    let record;
+    try { record = JSON.parse(line); } catch (_) { continue; }
+    const remoteJid = normalizeCustomerJid(record.remoteJid);
+    if (!remoteJid || record.fromMe) continue;
+    const ts = record.timestamp || Date.now();
+    const seenAt = new Date(ts).toISOString();
+    const current = byJid.get(remoteJid) || {
+      remoteJid,
+      phone: phoneFromJid(remoteJid),
+      name: "",
+      firstSeenAt: seenAt,
+      lastSeenAt: seenAt,
+      messageCount: 0,
+      lastMessage: "",
+      lastMessageAt: seenAt,
+      lastMessageType: "conversation",
+      status: "novo",
+      tags: [],
+      notes: "",
+      createdAt: seenAt,
+      updatedAt: seenAt,
+    };
+    if (record.pushName) current.name = record.pushName;
+    current.messageCount += 1;
+    if (new Date(seenAt) >= new Date(current.lastSeenAt || 0)) {
+      current.lastSeenAt = seenAt;
+      current.lastMessageAt = seenAt;
+      current.lastMessage = String(record.text || "").trim().slice(0, 500);
+      current.lastMessageType = record.messageType || current.lastMessageType;
+    }
+    if (new Date(seenAt) < new Date(current.firstSeenAt || seenAt)) current.firstSeenAt = seenAt;
+    byJid.set(remoteJid, current);
+  }
+  const contacts = Array.from(byJid.values()).map((c) => ({ ...c, ...(manual.get(c.remoteJid) || {}) }));
+  contacts.sort((a, b) => new Date(b.lastSeenAt || 0) - new Date(a.lastSeenAt || 0));
+  const crm = { version: 1, contacts };
+  saveCrm(instanceName, crm);
+  return crm;
+}
 
 function saveMessageEvent(instanceName, data) {
   try {
@@ -90,14 +223,16 @@ function saveMessageEvent(instanceName, data) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const filePath = path.join(dir, "messages.jsonl");
     const record = {
-      timestamp: Date.now(),
+      timestamp: data.messageTimestamp ? Number(data.messageTimestamp) * 1000 : Date.now(),
       fromMe: data.key?.fromMe || false,
       remoteJid: data.key?.remoteJid || "",
       messageId: data.key?.id || "",
       text: data.message?.conversation || "",
       pushName: data.pushName || "",
+      messageType: data.messageType || "conversation",
     };
     fs.appendFileSync(filePath, JSON.stringify(record) + "\n", "utf8");
+    upsertCrmContact(instanceName, record);
     if (typeof io !== "undefined" && io) {
       io.to(instanceName).emit("message_logged", record);
     }
@@ -587,6 +722,59 @@ app.get("/api/:instance/messages", validateInstance, (req, res) => {
   } catch (e) {
     console.error(`[${req.params.instance}] Erro ao ler mensagens:`, e.message);
     res.status(500).json({ error: "Erro ao ler histórico de mensagens." });
+  }
+});
+
+// GET /api/:instance/crm — listar contatos cadastrados automaticamente a partir das mensagens recebidas
+app.get("/api/:instance/crm", validateInstance, (req, res) => {
+  try {
+    const { instance } = req.params;
+    const rebuild = req.query.rebuild === "1";
+    const hasCrm = fs.existsSync(crmPath(instance));
+    const hasMessages = fs.existsSync(path.join(instanceDir(instance), "messages.jsonl"));
+    const crm = rebuild || (!hasCrm && hasMessages) ? rebuildCrmFromMessages(instance) : loadCrm(instance);
+    const q = normalizarTexto(req.query.q || "");
+    const status = String(req.query.status || "").trim().toLowerCase();
+    let contacts = crm.contacts || [];
+    if (q) {
+      contacts = contacts.filter((c) => normalizarTexto(`${c.name || ""} ${c.phone || ""} ${c.remoteJid || ""} ${c.lastMessage || ""} ${(c.tags || []).join(" ")}`).includes(q));
+    }
+    if (status) contacts = contacts.filter((c) => String(c.status || "novo").toLowerCase() === status);
+    res.json({ contacts, total: contacts.length, updatedAt: crm.updatedAt || null });
+  } catch (e) {
+    console.error(`[${req.params.instance}] Erro ao ler CRM:`, e.message);
+    res.status(500).json({ error: "Erro ao ler CRM da instância." });
+  }
+});
+
+// PATCH /api/:instance/crm/:remoteJid — atualizar campos manuais do contato no CRM
+app.patch("/api/:instance/crm/:remoteJid", validateInstance, (req, res) => {
+  try {
+    const { instance, remoteJid } = req.params;
+    const decodedJid = decodeURIComponent(remoteJid);
+    const crm = loadCrm(instance);
+    const idx = crm.contacts.findIndex((c) => c.remoteJid === decodedJid);
+    if (idx < 0) return res.status(404).json({ error: "Contato não encontrado no CRM." });
+
+    const allowedStatus = new Set(["novo", "em_atendimento", "orcamento", "cliente", "perdido", "arquivado"]);
+    const current = crm.contacts[idx];
+    const next = { ...current };
+    if (typeof req.body.name === "string") next.name = req.body.name.trim().slice(0, 120);
+    if (typeof req.body.status === "string") {
+      const status = req.body.status.trim().toLowerCase();
+      if (!allowedStatus.has(status)) return res.status(400).json({ error: "Status inválido." });
+      next.status = status;
+    }
+    if (Array.isArray(req.body.tags)) next.tags = req.body.tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 12);
+    if (typeof req.body.notes === "string") next.notes = req.body.notes.trim().slice(0, 2000);
+    next.updatedAt = new Date().toISOString();
+    crm.contacts[idx] = next;
+    saveCrm(instance, crm);
+    io.to(instance).emit("crm_contact_upserted", next);
+    res.json({ ok: true, contact: next });
+  } catch (e) {
+    console.error(`[${req.params.instance}] Erro ao atualizar CRM:`, e.message);
+    res.status(500).json({ error: "Erro ao atualizar contato no CRM." });
   }
 });
 

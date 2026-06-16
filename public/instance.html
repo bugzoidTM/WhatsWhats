@@ -239,6 +239,20 @@
     }
     #tab-historico tr { transition: background-color 0.15s; }
     #tab-historico tbody tr:hover { background: rgba(255,255,255,0.02); }
+    .crm-toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
+    .crm-toolbar input, .crm-toolbar select {
+      padding:10px 12px; background:rgba(0,0,0,0.3); border:1px solid var(--card-border);
+      border-radius:9px; color:var(--text); font-family:inherit; outline:none;
+    }
+    .crm-card-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap:12px; }
+    .crm-card { background:rgba(0,0,0,0.22); border:1px solid var(--card-border); border-radius:12px; padding:14px; }
+    .crm-card-header { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:10px; }
+    .crm-name { font-weight:700; line-height:1.25; }
+    .crm-phone { color:var(--accent-light); font-family:monospace; font-size:0.83rem; margin-top:3px; }
+    .crm-status { border-radius:999px; padding:3px 8px; background:rgba(16,185,129,0.1); color:var(--accent-light); font-size:0.72rem; white-space:nowrap; }
+    .crm-meta { display:grid; gap:5px; color:var(--text-muted); font-size:0.78rem; margin:10px 0; }
+    .crm-last { color:var(--text); font-size:0.86rem; line-height:1.45; min-height:38px; word-break:break-word; }
+    .crm-actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
   </style>
 </head>
 <body>
@@ -284,6 +298,7 @@
       <button class="tab-btn" data-tab="modelo">⚙️ Modelo</button>
       <button class="tab-btn" data-tab="webhooks">🔗 Webhooks</button>
       <button class="tab-btn" data-tab="base">📚 Base</button>
+      <button class="tab-btn" data-tab="crm">👥 CRM</button>
       <button class="tab-btn" data-tab="historico">💬 Histórico</button>
     </div>
 
@@ -482,6 +497,38 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
       </div>
     </div>
 
+    <!-- Aba CRM -->
+    <div id="tab-crm" class="tab-content">
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+          <div>
+            <h2 style="margin:0;">👥 CRM de Clientes</h2>
+            <p class="dica" style="margin:5px 0 0 0;">
+              Todo cliente que mandar mensagem no WhatsApp desta instância entra automaticamente aqui. Você pode acompanhar status, tags e observações.
+            </p>
+          </div>
+          <button class="btn btn-primary" id="btn-atualizar-crm">🔄 Atualizar</button>
+        </div>
+        <div class="crm-toolbar">
+          <input id="crm-busca" type="search" placeholder="Buscar por nome, telefone, tag ou mensagem" style="flex:1; min-width:240px;">
+          <select id="crm-status-filtro">
+            <option value="">Todos os status</option>
+            <option value="novo">Novo</option>
+            <option value="em_atendimento">Em atendimento</option>
+            <option value="orcamento">Orçamento</option>
+            <option value="cliente">Cliente</option>
+            <option value="perdido">Perdido</option>
+            <option value="arquivado">Arquivado</option>
+          </select>
+          <button class="btn btn-yellow btn-sm" id="btn-reconstruir-crm" title="Reconstrói a lista a partir do histórico de mensagens salvo">↻ Reconstruir</button>
+        </div>
+        <div id="crm-resumo" style="font-size:0.84rem; color:var(--text-muted); margin-bottom:12px;"></div>
+        <div id="crm-lista" class="crm-card-grid">
+          <div style="grid-column:1/-1; padding:20px; text-align:center; color:var(--text-muted);">Carregando CRM...</div>
+        </div>
+      </div>
+    </div>
+
     <!-- Aba Histórico de Mensagens -->
     <div id="tab-historico" class="tab-content">
       <div class="card">
@@ -602,6 +649,9 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
         $(`tab-${btn.dataset.tab}`).classList.add('ativo');
         if (btn.dataset.tab === 'historico') {
           carregarHistorico();
+        }
+        if (btn.dataset.tab === 'crm') {
+          carregarCrm();
         }
       });
     });
@@ -914,6 +964,113 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
       }
     });
 
+    // ── CRM de Clientes ──
+    const CRM_STATUS_LABELS = {
+      novo: 'Novo',
+      em_atendimento: 'Em atendimento',
+      orcamento: 'Orçamento',
+      cliente: 'Cliente',
+      perdido: 'Perdido',
+      arquivado: 'Arquivado',
+    };
+
+    function crmApiQuery(extra = '') {
+      const q = encodeURIComponent(($('crm-busca')?.value || '').trim());
+      const status = encodeURIComponent(($('crm-status-filtro')?.value || '').trim());
+      const parts = [];
+      if (q) parts.push(`q=${q}`);
+      if (status) parts.push(`status=${status}`);
+      if (extra) parts.push(extra);
+      return API(`/crm${parts.length ? '?' + parts.join('&') : ''}`);
+    }
+
+    function fmtDate(value) {
+      if (!value) return '—';
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return '—';
+      return d.toLocaleString('pt-BR');
+    }
+
+    async function carregarCrm(extra = '') {
+      const lista = $('crm-lista');
+      if (!lista) return;
+      lista.innerHTML = `<div style="grid-column:1/-1; padding:20px; text-align:center; color:var(--text-muted);">Carregando CRM...</div>`;
+      try {
+        const r = await fetch(crmApiQuery(extra));
+        if (!r.ok) throw new Error();
+        const data = await r.json();
+        const contacts = data.contacts || [];
+        $('crm-resumo').textContent = `${contacts.length} contato(s) encontrado(s)` + (data.updatedAt ? ` • atualizado em ${fmtDate(data.updatedAt)}` : '');
+        if (contacts.length === 0) {
+          lista.innerHTML = `<div style="grid-column:1/-1; padding:20px; text-align:center; color:var(--text-muted);">Nenhum cliente cadastrado ainda. Assim que alguém enviar mensagem, entrará automaticamente no CRM.</div>`;
+          return;
+        }
+        lista.innerHTML = contacts.map((c) => {
+          const jid = encodeURIComponent(c.remoteJid || '');
+          const nome = c.name || 'Cliente sem nome';
+          const phone = c.phone ? `+${c.phone}` : c.remoteJid;
+          const wa = c.phone ? `https://wa.me/${c.phone}` : '#';
+          const status = c.status || 'novo';
+          const tags = (c.tags || []).join(', ');
+          return `
+            <div class="crm-card" data-jid="${escHtml(c.remoteJid)}">
+              <div class="crm-card-header">
+                <div>
+                  <div class="crm-name">${escHtml(nome)}</div>
+                  <div class="crm-phone">${escHtml(phone || '')}</div>
+                </div>
+                <span class="crm-status">${escHtml(CRM_STATUS_LABELS[status] || status)}</span>
+              </div>
+              <div class="crm-last">${escHtml(c.lastMessage || 'Sem prévia da última mensagem.')}</div>
+              <div class="crm-meta">
+                <span>Primeiro contato: ${fmtDate(c.firstSeenAt)}</span>
+                <span>Último contato: ${fmtDate(c.lastSeenAt)}</span>
+                <span>Mensagens recebidas: ${Number(c.messageCount || 0)}</span>
+                ${tags ? `<span>Tags: ${escHtml(tags)}</span>` : ''}
+                ${c.notes ? `<span>Obs.: ${escHtml(c.notes)}</span>` : ''}
+              </div>
+              <div class="crm-actions">
+                <a class="btn btn-success btn-sm" href="${wa}" target="_blank" rel="noopener">💬 Abrir WhatsApp</a>
+                <button class="btn btn-yellow btn-sm" onclick="editarContatoCrm('${jid}')">✏️ Editar</button>
+              </div>
+            </div>`;
+        }).join('');
+      } catch (e) {
+        lista.innerHTML = `<div style="grid-column:1/-1; padding:20px; text-align:center; color:var(--red);">❌ Erro ao carregar CRM.</div>`;
+      }
+    }
+
+    window.editarContatoCrm = async (jidEncoded) => {
+      const jid = decodeURIComponent(jidEncoded);
+      const card = document.querySelector(`.crm-card[data-jid="${CSS.escape(jid)}"]`);
+      const atualStatus = prompt('Status: novo, em_atendimento, orcamento, cliente, perdido ou arquivado', card?.querySelector('.crm-status')?.textContent?.trim() || 'novo');
+      if (atualStatus === null) return;
+      const statusMap = Object.fromEntries(Object.entries(CRM_STATUS_LABELS).map(([k, v]) => [v.toLowerCase(), k]));
+      const status = statusMap[atualStatus.trim().toLowerCase()] || atualStatus.trim().toLowerCase();
+      const tagsRaw = prompt('Tags separadas por vírgula (opcional)', '');
+      if (tagsRaw === null) return;
+      const notes = prompt('Observações internas (opcional)', '');
+      if (notes === null) return;
+      try {
+        const r = await fetch(API(`/crm/${jidEncoded}`), {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status, tags: tagsRaw.split(',').map(t => t.trim()).filter(Boolean), notes }),
+        });
+        if (!r.ok) throw new Error((await r.json()).error || 'Erro');
+        toast('✅ Contato atualizado!');
+        carregarCrm();
+      } catch (e) { toast(e.message || 'Erro ao atualizar contato.', 'err'); }
+    };
+
+    $('btn-atualizar-crm').addEventListener('click', () => carregarCrm());
+    $('btn-reconstruir-crm').addEventListener('click', () => carregarCrm('rebuild=1'));
+    $('crm-status-filtro').addEventListener('change', () => carregarCrm());
+    let crmBuscaDebounce;
+    $('crm-busca').addEventListener('input', () => {
+      clearTimeout(crmBuscaDebounce);
+      crmBuscaDebounce = setTimeout(() => carregarCrm(), 350);
+    });
+
     // ── Histórico de Mensagens ──
     async function carregarHistorico() {
       const corpo = $('historico-mensagens-corpo');
@@ -952,6 +1109,13 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
       const activeTab = document.querySelector('.tab-btn.active');
       if (activeTab && activeTab.dataset.tab === 'historico') {
         carregarHistorico();
+      }
+    });
+
+    socket.on('crm_contact_upserted', () => {
+      const activeTab = document.querySelector('.tab-btn.active');
+      if (activeTab && activeTab.dataset.tab === 'crm') {
+        carregarCrm();
       }
     });
 
