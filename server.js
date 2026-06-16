@@ -106,6 +106,65 @@ function saveMessageEvent(instanceName, data) {
   }
 }
 
+function getRecentConversation(instanceName, remoteJid, limit = 12, maxAgeMs = 72 * 60 * 60 * 1000) {
+  try {
+    const filePath = path.join(instanceDir(instanceName), "messages.jsonl");
+    if (!fs.existsSync(filePath) || !remoteJid) return [];
+    const cutoff = Date.now() - maxAgeMs;
+    const lines = fs.readFileSync(filePath, "utf8").trim().split("\n").filter(Boolean);
+    const result = [];
+    for (let i = lines.length - 1; i >= 0 && result.length < limit; i--) {
+      let record;
+      try { record = JSON.parse(lines[i]); } catch (_) { continue; }
+      if (record.remoteJid !== remoteJid) continue;
+      if (record.timestamp && record.timestamp < cutoff) break;
+      const text = (record.text || "").trim();
+      if (!text) continue;
+      result.push({
+        role: record.fromMe ? "assistant" : "user",
+        text,
+        timestamp: record.timestamp || 0,
+      });
+    }
+    return result.reverse();
+  } catch (e) {
+    console.error(`[${instanceName}] Erro ao carregar contexto recente:`, e.message);
+    return [];
+  }
+}
+
+function detectarContextoComercial(history = [], textoAtual = "") {
+  const inbound = history.filter((m) => m.role === "user").map((m) => m.text).join("\n");
+  const outbound = history.filter((m) => m.role === "assistant").map((m) => m.text).join("\n");
+  const allUserTxt = normalizarTexto(`${inbound}\n${textoAtual}`);
+  const allBotTxt = normalizarTexto(outbound);
+  const currentTxt = normalizarTexto(textoAtual);
+
+  const querProjetoExtensao = /projeto\s+de\s+extens[aã]o|projeto\s+extens[aã]o|\bextens[aã]o\b/i.test(allUserTxt)
+    || /projeto\s+de\s+extens[aã]o/i.test(allBotTxt);
+  const querPronto = /\bpronto\b|modelo pronto|trabalho pronto|download imediato/i.test(allUserTxt)
+    || /trabalho pronto|modelo pronto/i.test(allBotTxt);
+  const pediuDados = /envie[:\s]+curso\/faculdade|curso e faculdade|informe curso|curso\/faculdade/i.test(allBotTxt);
+  const mencionouCursoFaculdade = /(criminologia|pedagogia|direito|administra[cç][aã]o|enfermagem|servi[cç]o social|educa[cç][aã]o f[ií]sica|unopar|anhanguera|pit[aá]goras|faculdade|universidade|curso)/i.test(allUserTxt);
+  const respostaCurtaDeDados = currentTxt.length <= 80 && mencionouCursoFaculdade && !/(quero|preciso|valor|pre[cç]o|prazo|pagamento|site)/i.test(currentTxt);
+
+  return { querProjetoExtensao, querPronto, pediuDados, mencionouCursoFaculdade, respostaCurtaDeDados };
+}
+
+function respostaContextualPorHistorico(texto, history = []) {
+  const contexto = detectarContextoComercial(history, texto);
+
+  if (contexto.querProjetoExtensao && contexto.querPronto && (contexto.mencionouCursoFaculdade || contexto.respostaCurtaDeDados)) {
+    return "Perfeito — entendi que você quer um projeto de extensão pronto. 😊\n\nTemos projeto de extensão pronto/modelo completo e editável em Word. O valor do pronto é R$ 50,00 no site, com acesso/download após confirmação do pagamento.\n\nComo você informou curso/faculdade, o próximo passo é verificar o modelo pronto mais adequado. Quer que eu te envie o link para comprar agora?";
+  }
+
+  if (contexto.pediuDados && contexto.mencionouCursoFaculdade && contexto.respostaCurtaDeDados) {
+    return "Perfeito, já ajuda. 😊\n\nPara eu te direcionar corretamente: você quer modelo pronto para comprar agora ou trabalho exclusivo sob encomenda? Se já tiver prazo final e orientações/prints do AVA, pode enviar também.";
+  }
+
+  return null;
+}
+
 
 /**
  * Valida o nome de uma instância — previne Directory Traversal e nomes inválidos.
@@ -1217,6 +1276,10 @@ function respostaContextualPorEstado(texto, state = {}) {
   const contextoOrcamento = [
     "trabalho_academico_orcamento_inteligente",
     "relatorio_estagio_supervisionado",
+    "projeto_extensao_apostileiros_inicial",
+    "4",
+    "10",
+    "12",
     "6",
     "9",
   ].includes(lastFlow);
@@ -1249,26 +1312,33 @@ function respostaParaTextoSolto(texto) {
   return null;
 }
 
-async function respostaPorIA(inst, texto) {
+async function respostaPorIA(inst, texto, history = []) {
   const aiClient = inst.aiClient || inst.groqClient;
   const ai = normalizeAiConfig(inst.config || {});
   if (!aiClient || !ai.apiKey) return null;
   try {
     const sysContent = [
       inst.config.promptSistema || "Você é um assistente prestativo.",
+      "\n\nNunca responda uma mensagem curta isolada sem considerar o contexto recente da conversa. Se o cliente já pediu projeto de extensão pronto e depois enviou curso/faculdade, continue esse atendimento e indique o projeto de extensão pronto em vez de reiniciar perguntas.",
       inst.config.knowledgeBase?.trim()
         ? `\n\n=== BASE DE CONHECIMENTO DO NEGÓCIO ===\n${inst.config.knowledgeBase}`
         : ""
     ].join("");
 
+    const contextualMessages = (history || []).slice(-10).map((m) => ({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: m.text,
+    }));
+
     const completion = await aiClient.chat.completions.create({
       model: ai.model || inst.config.model || "llama-3.1-8b-instant",
       messages: [
         { role: "system", content: sysContent },
+        ...contextualMessages,
         { role: "user", content: texto },
       ],
       max_tokens: Number(inst.config.maxTokens || 180),
-      temperature: 0.35,
+      temperature: 0.25,
     });
     return completion.choices?.[0]?.message?.content?.trim() || null;
   } catch (e) {
@@ -1312,6 +1382,7 @@ function scheduleBufferedResponse(instanceName, msg, chat, texto) {
 async function gerarRespostaParaTexto(instanceName, inst, msg, texto) {
   const stateKey = `${instanceName}:${msg.from}`;
   const state = conversationState.get(stateKey) || {};
+  const history = getRecentConversation(instanceName, msg.from);
   let intencaoInterna = detectarIntencaoInterna(texto);
   if (!intencaoInterna && state.pendingCourseSuggestion) {
     intencaoInterna = "sugestao_curso";
@@ -1330,6 +1401,7 @@ async function gerarRespostaParaTexto(instanceName, inst, msg, texto) {
   }
 
   let resposta = respostaContinuidadeSemIA(texto, state);
+  if (!resposta) resposta = respostaContextualPorHistorico(texto, history);
   if (!resposta) resposta = respostaContextualPorEstado(texto, state);
   let fluxoMatch = null;
   if (!resposta) {
@@ -1343,7 +1415,7 @@ async function gerarRespostaParaTexto(instanceName, inst, msg, texto) {
     conversationState.set(stateKey, state);
   }
   if (!resposta) resposta = respostaParaTextoSolto(texto);
-  if (!resposta && inst.config.useAI) resposta = await respostaPorIA(inst, texto);
+  if (!resposta && inst.config.useAI) resposta = await respostaPorIA(inst, texto, history);
   if (!resposta) resposta = "Me envie mais detalhes para eu te orientar melhor.";
   return resposta;
 }
