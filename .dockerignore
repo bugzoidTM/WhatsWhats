@@ -1,5 +1,6 @@
 # Dependências locais (instaladas no container)
 node_modules/
+agente-ia-whatsapp/
 
 # Cache do Puppeteer/WhatsApp
 .wwebjs_cache/
