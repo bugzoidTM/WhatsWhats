@@ -991,6 +991,18 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
       return d.toLocaleString('pt-BR');
     }
 
+    function crmPhoneDisplay(c) {
+      const phone = String(c.phone || '').replace(/\D/g, '');
+      if (phone) return `+${phone}`;
+      if ((c.remoteJid || '').endsWith('@lid')) return `ID WhatsApp: ${(c.remoteJid || '').split('@')[0]}`;
+      return c.remoteJid || 'Sem telefone público';
+    }
+
+    function crmWhatsAppLink(c) {
+      const phone = String(c.phone || '').replace(/\D/g, '');
+      return phone ? `https://wa.me/${phone}` : '#';
+    }
+
     async function carregarCrm(extra = '') {
       const lista = $('crm-lista');
       if (!lista) return;
@@ -1008,8 +1020,9 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
         lista.innerHTML = contacts.map((c) => {
           const jid = encodeURIComponent(c.remoteJid || '');
           const nome = c.name || 'Cliente sem nome';
-          const phone = c.phone ? `+${c.phone}` : c.remoteJid;
-          const wa = c.phone ? `https://wa.me/${c.phone}` : '#';
+          const phone = crmPhoneDisplay(c);
+          const wa = crmWhatsAppLink(c);
+          const hasPhone = Boolean(String(c.phone || '').replace(/\D/g, ''));
           const status = c.status || 'novo';
           const tags = (c.tags || []).join(', ');
           return `
@@ -1030,7 +1043,9 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
                 ${c.notes ? `<span>Obs.: ${escHtml(c.notes)}</span>` : ''}
               </div>
               <div class="crm-actions">
-                <a class="btn btn-success btn-sm" href="${wa}" target="_blank" rel="noopener">💬 Abrir WhatsApp</a>
+                ${hasPhone
+                  ? `<a class="btn btn-success btn-sm" href="${wa}" target="_blank" rel="noopener">💬 Abrir WhatsApp</a>`
+                  : `<button class="btn btn-success btn-sm" disabled title="Telefone público ainda não disponível para este @lid">💬 Sem telefone</button>`}
                 <button class="btn btn-yellow btn-sm" onclick="editarContatoCrm('${jid}')">✏️ Editar</button>
               </div>
             </div>`;

@@ -102,14 +102,71 @@ function writeJsonFileAtomic(filePath, data) {
 
 function normalizeCustomerJid(remoteJid = "") {
   const jid = String(remoteJid || "").trim();
-  if (!jid || jid.endsWith("@g.us")) return "";
+  if (!jid || jid === "0@c.us" || jid.endsWith("@g.us")) return "";
   return jid;
+}
+
+function cleanPhoneNumber(value = "") {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!digits || digits === "0") return "";
+  // Números WhatsApp reais costumam ter 8 a 15 dígitos. IDs @lid podem ter 14/15 dígitos,
+  // então só use esta função para campos vindos explicitamente de contato/número, não do @lid.
+  if (digits.length < 8 || digits.length > 15) return "";
+  return digits;
 }
 
 function phoneFromJid(remoteJid = "") {
   const jid = String(remoteJid || "");
-  if (jid.endsWith("@c.us") || jid.endsWith("@s.whatsapp.net")) return jid.split("@")[0].replace(/\D/g, "");
-  return jid.replace(/\D/g, "");
+  if (jid.endsWith("@c.us") || jid.endsWith("@s.whatsapp.net")) return cleanPhoneNumber(jid.split("@")[0]);
+  // @lid não é telefone público do cliente; é um identificador interno do WhatsApp.
+  return "";
+}
+
+function bestCustomerPhone(record = {}, remoteJid = "") {
+  return cleanPhoneNumber(record.contactNumber || record.phone || record.number) || phoneFromJid(remoteJid);
+}
+
+function bestCustomerName(record = {}) {
+  return String(
+    record.contactName ||
+    record.pushName ||
+    record.profileName ||
+    record.verifiedName ||
+    record.name ||
+    ""
+  ).trim();
+}
+
+function scrubStoredPhoneForJid(phone = "", remoteJid = "") {
+  const digits = cleanPhoneNumber(phone);
+  const jid = String(remoteJid || "");
+  if (!digits) return "";
+  if (jid.endsWith("@lid") && digits === jid.split("@")[0].replace(/\D/g, "")) return "";
+  return digits;
+}
+
+async function getCustomerContactSnapshot(msg) {
+  const snapshot = {
+    pushName: msg.notifyName || "",
+    contactName: "",
+    profileName: "",
+    verifiedName: "",
+    contactNumber: "",
+    contactId: "",
+  };
+  try {
+    const contact = await msg.getContact();
+    snapshot.contactId = contact?.id?._serialized || contact?.id?.user || "";
+    const contactJid = contact?.id?._serialized || "";
+    snapshot.contactNumber = cleanPhoneNumber(contact?.number || (contactJid.endsWith("@c.us") ? contact?.id?.user : ""));
+    snapshot.contactName = String(contact?.name || contact?.pushname || contact?.shortName || "").trim();
+    snapshot.profileName = String(contact?.pushname || contact?.shortName || "").trim();
+    snapshot.verifiedName = String(contact?.verifiedName || "").trim();
+    if (!snapshot.pushName) snapshot.pushName = snapshot.profileName || snapshot.contactName;
+  } catch (e) {
+    console.warn(`Não consegui obter contato de ${msg.from || "mensagem"}:`, e.message);
+  }
+  return snapshot;
 }
 
 function loadCrm(instanceName) {
@@ -141,10 +198,16 @@ function upsertCrmContact(instanceName, record) {
   const idx = crm.contacts.findIndex((c) => c.remoteJid === remoteJid);
   const current = idx >= 0 ? crm.contacts[idx] : {};
   const text = String(record.text || "").trim();
+  const incomingName = bestCustomerName(record);
+  const incomingPhone = bestCustomerPhone(record, remoteJid);
+  const currentPhone = scrubStoredPhoneForJid(current.phone, remoteJid);
   const next = {
     remoteJid,
-    phone: current.phone || phoneFromJid(remoteJid),
-    name: record.pushName || current.name || "",
+    phone: incomingPhone || currentPhone || "",
+    name: incomingName || current.name || "",
+    contactId: record.contactId || current.contactId || "",
+    contactName: record.contactName || current.contactName || "",
+    profileName: record.profileName || current.profileName || "",
     firstSeenAt: current.firstSeenAt || nowIso,
     lastSeenAt: nowIso,
     messageCount: Number(current.messageCount || 0) + 1,
@@ -169,6 +232,8 @@ function rebuildCrmFromMessages(instanceName) {
   const filePath = path.join(instanceDir(instanceName), "messages.jsonl");
   const existing = loadCrm(instanceName);
   const manual = new Map(existing.contacts.map((c) => [c.remoteJid, {
+    name: c.name || "",
+    phone: scrubStoredPhoneForJid(c.phone, c.remoteJid),
     status: c.status || "novo",
     tags: Array.isArray(c.tags) ? c.tags : [],
     notes: c.notes || "",
@@ -185,8 +250,11 @@ function rebuildCrmFromMessages(instanceName) {
     const seenAt = new Date(ts).toISOString();
     const current = byJid.get(remoteJid) || {
       remoteJid,
-      phone: phoneFromJid(remoteJid),
+      phone: "",
       name: "",
+      contactId: "",
+      contactName: "",
+      profileName: "",
       firstSeenAt: seenAt,
       lastSeenAt: seenAt,
       messageCount: 0,
@@ -199,7 +267,13 @@ function rebuildCrmFromMessages(instanceName) {
       createdAt: seenAt,
       updatedAt: seenAt,
     };
-    if (record.pushName) current.name = record.pushName;
+    const incomingPhone = bestCustomerPhone(record, remoteJid);
+    const incomingName = bestCustomerName(record);
+    if (incomingPhone) current.phone = incomingPhone;
+    if (incomingName) current.name = incomingName;
+    if (record.contactId) current.contactId = record.contactId;
+    if (record.contactName) current.contactName = record.contactName;
+    if (record.profileName) current.profileName = record.profileName;
     current.messageCount += 1;
     if (new Date(seenAt) >= new Date(current.lastSeenAt || 0)) {
       current.lastSeenAt = seenAt;
@@ -210,7 +284,15 @@ function rebuildCrmFromMessages(instanceName) {
     if (new Date(seenAt) < new Date(current.firstSeenAt || seenAt)) current.firstSeenAt = seenAt;
     byJid.set(remoteJid, current);
   }
-  const contacts = Array.from(byJid.values()).map((c) => ({ ...c, ...(manual.get(c.remoteJid) || {}) }));
+  const contacts = Array.from(byJid.values()).map((c) => {
+    const preserved = manual.get(c.remoteJid) || {};
+    return {
+      ...c,
+      ...preserved,
+      name: c.name || preserved.name || "",
+      phone: c.phone || preserved.phone || "",
+    };
+  });
   contacts.sort((a, b) => new Date(b.lastSeenAt || 0) - new Date(a.lastSeenAt || 0));
   const crm = { version: 1, contacts };
   saveCrm(instanceName, crm);
@@ -229,6 +311,11 @@ function saveMessageEvent(instanceName, data) {
       messageId: data.key?.id || "",
       text: data.message?.conversation || "",
       pushName: data.pushName || "",
+      contactName: data.contactName || "",
+      profileName: data.profileName || "",
+      verifiedName: data.verifiedName || "",
+      contactNumber: data.contactNumber || "",
+      contactId: data.contactId || "",
       messageType: data.messageType || "conversation",
     };
     fs.appendFileSync(filePath, JSON.stringify(record) + "\n", "utf8");
@@ -1320,7 +1407,7 @@ async function handleCustomerAudio(instanceName, inst, msg, chat, media, mediaIn
     message: { conversation: textoLegenda || "[áudio recebido]" },
     messageType: "audio",
     messageTimestamp: msg.timestamp,
-    pushName: msg.notifyName || "",
+    ...(await getCustomerContactSnapshot(msg)),
   };
   await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
   saveMessageEvent(instanceName, incomingPayload);
@@ -1392,7 +1479,7 @@ async function handleCustomerMedia(instanceName, inst, msg, chat) {
     message: { conversation: texto || `[${mediaInfo.tipo} recebida]` },
     messageType: mediaInfo.tipo,
     messageTimestamp: msg.timestamp,
-    pushName: msg.notifyName || "",
+    ...(await getCustomerContactSnapshot(msg)),
   };
   await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
   saveMessageEvent(instanceName, incomingPayload);
@@ -1659,7 +1746,7 @@ async function handleMessage(instanceName, msg) {
       message: { conversation: texto },
       messageType: "conversation",
       messageTimestamp: msg.timestamp,
-      pushName: msg.notifyName || "",
+      ...(await getCustomerContactSnapshot(msg)),
     };
     await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
     saveMessageEvent(instanceName, incomingPayload);
