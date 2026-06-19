@@ -145,7 +145,71 @@ function scrubStoredPhoneForJid(phone = "", remoteJid = "") {
   return digits;
 }
 
-async function getCustomerContactSnapshot(msg) {
+async function getWhatsAppStoreContactSnapshot(inst, remoteJid) {
+  const jid = normalizeCustomerJid(remoteJid);
+  const page = inst?.whatsappClient?.pupPage;
+  if (!jid || !page) return null;
+
+  try {
+    return await page.evaluate((targetJid) => {
+      const contacts = window.Store?.Contact?.getModelsArray?.() || [];
+      const serialize = (c) => c ? {
+        id: c.id?._serialized || "",
+        user: c.id?.user || "",
+        server: c.id?.server || "",
+        name: c.name || "",
+        pushname: c.pushname || "",
+        shortName: c.shortName || "",
+        verifiedName: c.verifiedName || "",
+        number: c.number || "",
+        contactHash: c.contactHash || "",
+        pnContactHash: c.pnContactHash || "",
+        isAddressBookContact: !!c.isAddressBookContact,
+      } : null;
+      const contact = contacts.find((c) => c.id?._serialized === targetJid) || null;
+      let phoneContact = null;
+
+      if (contact?.id?.server === "c.us") {
+        phoneContact = contact;
+      } else if (contact?.pnContactHash) {
+        phoneContact = contacts.find((c) => c.id?.server === "c.us" && c.contactHash === contact.pnContactHash) || null;
+      }
+
+      if (!phoneContact && contact) {
+        const targetName = String(contact.name || contact.shortName || "").trim().toLowerCase();
+        if (targetName) {
+          const sameName = contacts.filter((c) => c.id?.server === "c.us" && String(c.name || c.shortName || "").trim().toLowerCase() === targetName);
+          if (sameName.length === 1) phoneContact = sameName[0];
+        }
+      }
+
+      return { contact: serialize(contact), phoneContact: serialize(phoneContact) };
+    }, jid);
+  } catch (e) {
+    console.warn(`Não consegui consultar Store.Contact para ${jid}:`, e.message);
+    return null;
+  }
+}
+
+function applyStoreContactSnapshot(snapshot, storeSnapshot) {
+  const contact = storeSnapshot?.contact || null;
+  const phoneContact = storeSnapshot?.phoneContact || null;
+  if (!contact && !phoneContact) return snapshot;
+
+  const source = contact || phoneContact;
+  const phoneJid = phoneContact?.id || "";
+  const phone = phoneJid.endsWith("@c.us") ? phoneJid.split("@")[0] : phoneContact?.number || "";
+
+  if (!snapshot.contactId && source?.id) snapshot.contactId = source.id;
+  if (!snapshot.contactNumber) snapshot.contactNumber = cleanPhoneNumber(phone);
+  if (!snapshot.contactName) snapshot.contactName = String(source?.name || "").trim();
+  if (!snapshot.profileName) snapshot.profileName = String(source?.pushname || source?.shortName || "").trim();
+  if (!snapshot.verifiedName) snapshot.verifiedName = String(source?.verifiedName || phoneContact?.verifiedName || "").trim();
+  if (!snapshot.pushName) snapshot.pushName = snapshot.contactName || snapshot.profileName || snapshot.verifiedName;
+  return snapshot;
+}
+
+async function getCustomerContactSnapshot(msg, inst = null) {
   const snapshot = {
     pushName: msg.notifyName || "",
     contactName: "",
@@ -166,7 +230,9 @@ async function getCustomerContactSnapshot(msg) {
   } catch (e) {
     console.warn(`Não consegui obter contato de ${msg.from || "mensagem"}:`, e.message);
   }
-  return snapshot;
+
+  const storeSnapshot = await getWhatsAppStoreContactSnapshot(inst, msg.from);
+  return applyStoreContactSnapshot(snapshot, storeSnapshot);
 }
 
 function loadCrm(instanceName) {
@@ -296,6 +362,50 @@ function rebuildCrmFromMessages(instanceName) {
   contacts.sort((a, b) => new Date(b.lastSeenAt || 0) - new Date(a.lastSeenAt || 0));
   const crm = { version: 1, contacts };
   saveCrm(instanceName, crm);
+  return crm;
+}
+
+async function enrichCrmFromWhatsAppStore(instanceName, inst, crm) {
+  if (!inst?.whatsappClient?.pupPage || !crm?.contacts?.length) return crm;
+  let changed = false;
+  for (const contact of crm.contacts) {
+    const storeSnapshot = await getWhatsAppStoreContactSnapshot(inst, contact.remoteJid);
+    const before = JSON.stringify({
+      phone: contact.phone || "",
+      name: contact.name || "",
+      contactName: contact.contactName || "",
+      profileName: contact.profileName || "",
+      verifiedName: contact.verifiedName || "",
+    });
+    const snapshot = applyStoreContactSnapshot({
+      pushName: contact.name || "",
+      contactName: contact.contactName || "",
+      profileName: contact.profileName || "",
+      verifiedName: contact.verifiedName || "",
+      contactNumber: scrubStoredPhoneForJid(contact.phone, contact.remoteJid),
+      contactId: contact.contactId || contact.remoteJid || "",
+    }, storeSnapshot);
+
+    contact.phone = snapshot.contactNumber || scrubStoredPhoneForJid(contact.phone, contact.remoteJid) || "";
+    contact.name = contact.name || snapshot.contactName || snapshot.profileName || snapshot.verifiedName || snapshot.pushName || "";
+    contact.contactName = contact.contactName || snapshot.contactName || "";
+    contact.profileName = contact.profileName || snapshot.profileName || "";
+    contact.verifiedName = contact.verifiedName || snapshot.verifiedName || "";
+    contact.contactId = contact.contactId || snapshot.contactId || "";
+
+    const after = JSON.stringify({
+      phone: contact.phone || "",
+      name: contact.name || "",
+      contactName: contact.contactName || "",
+      profileName: contact.profileName || "",
+      verifiedName: contact.verifiedName || "",
+    });
+    if (before !== after) {
+      contact.updatedAt = new Date().toISOString();
+      changed = true;
+    }
+  }
+  if (changed) saveCrm(instanceName, crm);
   return crm;
 }
 
@@ -813,13 +923,15 @@ app.get("/api/:instance/messages", validateInstance, (req, res) => {
 });
 
 // GET /api/:instance/crm — listar contatos cadastrados automaticamente a partir das mensagens recebidas
-app.get("/api/:instance/crm", validateInstance, (req, res) => {
+app.get("/api/:instance/crm", validateInstance, async (req, res) => {
   try {
     const { instance } = req.params;
     const rebuild = req.query.rebuild === "1";
     const hasCrm = fs.existsSync(crmPath(instance));
     const hasMessages = fs.existsSync(path.join(instanceDir(instance), "messages.jsonl"));
-    const crm = rebuild || (!hasCrm && hasMessages) ? rebuildCrmFromMessages(instance) : loadCrm(instance);
+    let crm = rebuild || (!hasCrm && hasMessages) ? rebuildCrmFromMessages(instance) : loadCrm(instance);
+    const inst = instances.get(instance);
+    crm = await enrichCrmFromWhatsAppStore(instance, inst, crm);
     const q = normalizarTexto(req.query.q || "");
     const status = String(req.query.status || "").trim().toLowerCase();
     let contacts = crm.contacts || [];
@@ -1407,7 +1519,7 @@ async function handleCustomerAudio(instanceName, inst, msg, chat, media, mediaIn
     message: { conversation: textoLegenda || "[áudio recebido]" },
     messageType: "audio",
     messageTimestamp: msg.timestamp,
-    ...(await getCustomerContactSnapshot(msg)),
+    ...(await getCustomerContactSnapshot(msg, inst)),
   };
   await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
   saveMessageEvent(instanceName, incomingPayload);
@@ -1479,7 +1591,7 @@ async function handleCustomerMedia(instanceName, inst, msg, chat) {
     message: { conversation: texto || `[${mediaInfo.tipo} recebida]` },
     messageType: mediaInfo.tipo,
     messageTimestamp: msg.timestamp,
-    ...(await getCustomerContactSnapshot(msg)),
+    ...(await getCustomerContactSnapshot(msg, inst)),
   };
   await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
   saveMessageEvent(instanceName, incomingPayload);
@@ -1746,7 +1858,7 @@ async function handleMessage(instanceName, msg) {
       message: { conversation: texto },
       messageType: "conversation",
       messageTimestamp: msg.timestamp,
-      ...(await getCustomerContactSnapshot(msg)),
+      ...(await getCustomerContactSnapshot(msg, inst)),
     };
     await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
     saveMessageEvent(instanceName, incomingPayload);
