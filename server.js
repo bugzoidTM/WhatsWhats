@@ -88,6 +88,7 @@ const crmPath     = (name) => path.join(instanceDir(name), "crm.json");
 const manualPausesPath = (name) => path.join(instanceDir(name), "manual-pauses.json");
 const delay       = (ms)   => new Promise((r) => setTimeout(r, ms));
 const automatedOutgoing = new Map();
+const productCatalogCache = { loadedAt: 0, products: [] };
 
 function readJsonFileSafe(filePath, fallback) {
   try {
@@ -562,6 +563,7 @@ function detectarContextoComercial(history = [], textoAtual = "") {
   const allBotTxt = normalizarTexto(outbound);
   const currentTxt = normalizarTexto(textoAtual);
 
+  const querCorrecao = detectarIntencaoCorrecao(`${inbound}\n${textoAtual}`);
   const querProjetoExtensao = /projeto\s+de\s+extens[aã]o|projeto\s+extens[aã]o|\bextens[aã]o\b/i.test(allUserTxt)
     || /projeto\s+de\s+extens[aã]o/i.test(allBotTxt);
   const querPronto = /\bpronto\b|modelo pronto|trabalho pronto|download imediato/i.test(allUserTxt)
@@ -570,11 +572,147 @@ function detectarContextoComercial(history = [], textoAtual = "") {
   const mencionouCursoFaculdade = /(criminologia|pedagogia|direito|administra[cç][aã]o|enfermagem|servi[cç]o social|educa[cç][aã]o f[ií]sica|unopar|anhanguera|pit[aá]goras|faculdade|universidade|curso)/i.test(allUserTxt);
   const respostaCurtaDeDados = currentTxt.length <= 80 && mencionouCursoFaculdade && !/(quero|preciso|valor|pre[cç]o|prazo|pagamento|site)/i.test(currentTxt);
 
-  return { querProjetoExtensao, querPronto, pediuDados, mencionouCursoFaculdade, respostaCurtaDeDados };
+  return { querCorrecao, querProjetoExtensao, querPronto, pediuDados, mencionouCursoFaculdade, respostaCurtaDeDados };
+}
+
+function detectarIntencaoCorrecao(texto = "") {
+  const txt = normalizarTexto(texto);
+  return /\b(correcao|corrigir|corrija|corrigido|revisao|revisar|formatacao|formatar|abnt|feedback|orientacoes do polo|comentario do tutor)\b/.test(txt);
+}
+
+function respostaParaCorrecao(texto, state, history = []) {
+  const txt = normalizarTexto(texto);
+  const historico = normalizarTexto((history || []).filter((m) => m.role === "user").map((m) => m.text).join("\n"));
+  const contextoCorrecao = detectarIntencaoCorrecao(`${historico}\n${texto}`) || state.awaitingCorrectionOrigin;
+  if (!contextoCorrecao) return null;
+  if (detectarPedidoLinkProduto(texto, [])) return null;
+
+  state.awaitingCorrectionOrigin = true;
+  state.lastFlowId = "correcao_trabalho";
+  state.updatedAt = Date.now();
+
+  const confirmouNosso = /\b(sim|foi|foi sim|comprei|comprei com voces|comprei com voces|foi feito por voces|feito por voces|feito com voces|pela apostileiros)\b/.test(txt);
+  const negouNosso = /\b(nao|não|nao foi|não foi|fiz fora|outro lugar|outra pessoa)\b/.test(txt);
+
+  if (confirmouNosso) {
+    return "Perfeito. Se o trabalho foi feito por nós, a correção é gratuita. 😊\n\nEnvie aqui o arquivo do trabalho e as orientações/comentários de correção do polo/tutor. Assim que receber, encaminho automaticamente para a equipe analisar.";
+  }
+
+  if (negouNosso) {
+    return "Certo. Mesmo não sendo um trabalho feito por nós, podemos analisar.\n\nEnvie o arquivo e as orientações/comentários de correção do polo/tutor. A equipe precisa avaliar antes de confirmar prazo e valor.";
+  }
+
+  return "Entendi que você precisa de correção. Primeiro preciso confirmar: esse trabalho foi feito por nós?\n\nSe foi feito conosco, a correção é gratuita. Se não foi, também podemos analisar, mas precisamos avaliar antes.\n\nPode enviar o arquivo do trabalho junto com as orientações/comentários de correção do polo/tutor.";
+}
+
+function detectarPedidoLinkProduto(texto = "", history = []) {
+  const txt = normalizarTexto(texto);
+  const historico = normalizarTexto((history || []).filter((m) => m.role === "user").map((m) => m.text).join("\n"));
+  const pediuLink = /(link|comprar|compra|carrinho|pagina|produto|site)/.test(txt);
+  const temProdutoEspecifico = /(projeto|extensao|portfolio|portifolio|tcc|atividade|pratica|relatorio|estagio|curso|faculdade|pedagogia|criminologia|enfermagem|administracao|contabeis|uninter|unopar|anhanguera|arquitetura|crime)/.test(`${historico}\n${txt}`);
+  return pediuLink && temProdutoEspecifico;
+}
+
+function decodeHtmlEntity(value = "") {
+  return String(value || "")
+    .replace(/&#8211;|&ndash;/g, "–")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extrairProdutosApostileiros(html = "") {
+  const products = [];
+  const re = /\[\*\*([^\]]+)\*\*\]\((https:\/\/apostileiros\.com\.br\/produto\/[^)]+)\)/g;
+  let match;
+  while ((match = re.exec(html))) {
+    products.push({ title: decodeHtmlEntity(match[1]), url: match[2] });
+  }
+  if (products.length) return products;
+
+  const htmlRe = /<a[^>]+href=["'](https:\/\/apostileiros\.com\.br\/produto\/[^"']+)["'][^>]*>(.*?)<\/a>/gis;
+  while ((match = htmlRe.exec(html))) {
+    const title = decodeHtmlEntity(match[2]);
+    if (title && !products.some((p) => p.url === match[1])) products.push({ title, url: match[1] });
+  }
+  return products;
+}
+
+function termosBuscaProduto(texto = "") {
+  const stop = new Set(["envia", "enviar", "link", "comprar", "compra", "pra", "para", "por", "favor", "trabalho", "atividade", "curso", "faculdade", "preciso", "quero", "gostaria", "correcao", "corrigir", "receber"]);
+  return normalizarTexto(texto).split(" ").filter((w) => w.length >= 3 && !stop.has(w));
+}
+
+function pontuarProdutoApostileiros(product, queryText = "") {
+  const title = normalizarTexto(product.title || "");
+  const url = normalizarTexto(product.url || "").replace(/-/g, " ");
+  const hay = `${title} ${url}`;
+  let score = 0;
+  for (const term of termosBuscaProduto(queryText)) {
+    if (hay.includes(term)) score += term.length >= 7 ? 3 : 1;
+  }
+  if (/projeto.*extensao/.test(normalizarTexto(queryText)) && /projeto.*extensao/.test(title)) score += 8;
+  if (/tcc/.test(normalizarTexto(queryText)) && /tcc/.test(title)) score += 8;
+  if (/portfolio|portifolio/.test(normalizarTexto(queryText)) && /portfolio|portifolio/.test(title)) score += 8;
+  return score;
+}
+
+async function carregarCatalogoApostileiros(maxPages = 12) {
+  const now = Date.now();
+  if (productCatalogCache.products.length && now - productCatalogCache.loadedAt < 6 * 60 * 60 * 1000) return productCatalogCache.products;
+
+  const products = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const url = page === 1
+      ? "https://apostileiros.com.br/todos-nossos-produtos/"
+      : `https://apostileiros.com.br/todos-nossos-produtos/page/${page}/`;
+    try {
+      const response = await fetch(url, { headers: { "user-agent": "Mozilla/5.0 ApostileirosBot/1.0" } });
+      if (!response.ok) continue;
+      const html = await response.text();
+      for (const product of extrairProdutosApostileiros(html)) {
+        if (!products.some((p) => p.url === product.url)) products.push(product);
+      }
+    } catch (e) {
+      console.warn(`Falha ao carregar catálogo Apostileiros ${url}:`, e.message);
+    }
+  }
+  if (products.length) {
+    productCatalogCache.products = products;
+    productCatalogCache.loadedAt = now;
+  }
+  return productCatalogCache.products;
+}
+
+async function buscarProdutoApostileiros(texto, history = []) {
+  const queryText = [
+    ...(history || []).filter((m) => m.role === "user").map((m) => m.text),
+    texto,
+  ].join("\n");
+  const products = await carregarCatalogoApostileiros();
+  const ranked = products
+    .map((product) => ({ ...product, score: pontuarProdutoApostileiros(product, queryText) }))
+    .filter((product) => product.score >= 10)
+    .sort((a, b) => b.score - a.score);
+  return ranked[0] || null;
+}
+
+async function respostaParaPedidoLinkProduto(texto, history = []) {
+  if (!detectarPedidoLinkProduto(texto, history)) return null;
+  const produto = await buscarProdutoApostileiros(texto, history);
+  if (produto?.url) {
+    return `Encontrei este produto na loja:\n${produto.title}\n${produto.url}\n\nConfira se é exatamente o trabalho que você precisa antes de comprar. Se não for, me diga o curso/faculdade e o nome da atividade para eu verificar melhor.`;
+  }
+  return "Não encontrei um link específico com segurança na loja pelo que foi informado.\n\nVeja todos os produtos aqui: https://apostileiros.com.br/todos-nossos-produtos/\n\nSe quiser, envie o curso/faculdade, tipo de trabalho e tema/nome da atividade que eu verifico o link mais adequado.";
 }
 
 function respostaContextualPorHistorico(texto, history = []) {
   const contexto = detectarContextoComercial(history, texto);
+
+  if (contexto.querCorrecao) return null;
 
   if (contexto.querProjetoExtensao && contexto.querPronto && (contexto.mencionouCursoFaculdade || contexto.respostaCurtaDeDados)) {
     return "Perfeito — entendi que você quer um projeto de extensão pronto. 😊\n\nTemos projeto de extensão pronto/modelo completo e editável em Word. O valor do pronto é R$ 50,00 no site, com acesso/download após confirmação do pagamento.\n\nComo você informou curso/faculdade, o próximo passo é verificar o modelo pronto mais adequado. Quer que eu te envie o link para comprar agora?";
@@ -1409,7 +1547,9 @@ async function notificarAtendente(inst, instanceName, tipo, msg, texto, options 
     ? "📌 Sugestão de novo curso recebida"
     : tipo === "midia_cliente"
       ? "📎 Cliente enviou mídia/arquivo para análise"
-      : "🚨 Cliente pediu atendimento humano";
+      : tipo === "correcao_cliente"
+        ? "🛠️ Cliente enviou material para correção"
+        : "🚨 Cliente pediu atendimento humano";
 
   const detalhesMidia = options.mediaInfo
     ? [
@@ -1697,7 +1837,17 @@ async function handleCustomerMedia(instanceName, inst, msg, chat) {
   }
 
   const pergunta = texto || "Cliente enviou mídia/arquivo sem texto.";
-  await notificarAtendente(inst, instanceName, "midia_cliente", msg, pergunta, { media, mediaInfo });
+  const history = getRecentConversation(instanceName, msg.from, 8, 7 * 24 * 60 * 60 * 1000);
+  const contextoCorrecao = detectarIntencaoCorrecao(`${history.filter((m) => m.role === "user").map((m) => m.text).join("\n")}\n${texto}`);
+  const perguntaComContexto = contextoCorrecao
+    ? [
+        pergunta,
+        "",
+        "Contexto recente de correção:",
+        ...history.filter((m) => m.role === "user").slice(-4).map((m) => `- ${String(m.text || "").replace(/\n/g, " | ").slice(0, 300)}`),
+      ].join("\n")
+    : pergunta;
+  await notificarAtendente(inst, instanceName, contextoCorrecao ? "correcao_cliente" : "midia_cliente", msg, perguntaComContexto, { media, mediaInfo });
 
   if (inst.config.humanoAtendeu) return;
 
@@ -1887,7 +2037,10 @@ async function gerarRespostaParaTexto(instanceName, inst, msg, texto) {
     conversationState.set(stateKey, state);
   }
 
-  let resposta = respostaContinuidadeSemIA(texto, state);
+  let resposta = respostaParaCorrecao(texto, state, history);
+  if (resposta) conversationState.set(stateKey, state);
+  if (!resposta) resposta = await respostaParaPedidoLinkProduto(texto, history);
+  if (!resposta) resposta = respostaContinuidadeSemIA(texto, state);
   if (!resposta) resposta = respostaContextualPorHistorico(texto, history);
   if (!resposta) resposta = respostaContextualPorEstado(texto, state);
   let fluxoMatch = null;

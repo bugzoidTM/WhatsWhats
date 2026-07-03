@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "instalar": "npm install",
-    "test:manual-pause": "node scripts/test-manual-pause-contract.mjs"
+    "test:manual-pause": "node scripts/test-manual-pause-contract.mjs",
+    "test:correction-product": "node scripts/test-correction-product-contract.mjs"
   },
   "dependencies": {
     "express": "^4.18.2",
