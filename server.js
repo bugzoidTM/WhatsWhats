@@ -88,7 +88,8 @@ const crmPath     = (name) => path.join(instanceDir(name), "crm.json");
 const manualPausesPath = (name) => path.join(instanceDir(name), "manual-pauses.json");
 const delay       = (ms)   => new Promise((r) => setTimeout(r, ms));
 const automatedOutgoing = new Map();
-const productCatalogCache = { loadedAt: 0, products: [] };
+// Catálogo de produtos por instância (feature opcional: config.catalogoUrl).
+const productCatalogCache = new Map(); // instanceName -> { loadedAt, products }
 
 function readJsonFileSafe(filePath, fallback) {
   try {
@@ -556,61 +557,13 @@ function getRecentConversation(instanceName, remoteJid, limit = 12, maxAgeMs = 7
   }
 }
 
-function detectarContextoComercial(history = [], textoAtual = "") {
-  const inbound = history.filter((m) => m.role === "user").map((m) => m.text).join("\n");
-  const outbound = history.filter((m) => m.role === "assistant").map((m) => m.text).join("\n");
-  const allUserTxt = normalizarTexto(`${inbound}\n${textoAtual}`);
-  const allBotTxt = normalizarTexto(outbound);
-  const currentTxt = normalizarTexto(textoAtual);
+// Regras de negócio específicas (correção de trabalhos, contexto comercial,
+// respostas prontas por segmento) NÃO vivem mais no código: cada instância
+// trata isso com promptSistema + knowledgeBase + flows + histórico (IA).
 
-  const querCorrecao = detectarIntencaoCorrecao(`${inbound}\n${textoAtual}`);
-  const querProjetoExtensao = /projeto\s+de\s+extens[aã]o|projeto\s+extens[aã]o|\bextens[aã]o\b/i.test(allUserTxt)
-    || /projeto\s+de\s+extens[aã]o/i.test(allBotTxt);
-  const querPronto = /\bpronto\b|modelo pronto|trabalho pronto|download imediato/i.test(allUserTxt)
-    || /trabalho pronto|modelo pronto/i.test(allBotTxt);
-  const pediuDados = /envie[:\s]+curso\/faculdade|curso e faculdade|informe curso|curso\/faculdade/i.test(allBotTxt);
-  const mencionouCursoFaculdade = /(criminologia|pedagogia|direito|administra[cç][aã]o|enfermagem|servi[cç]o social|educa[cç][aã]o f[ií]sica|unopar|anhanguera|pit[aá]goras|faculdade|universidade|curso)/i.test(allUserTxt);
-  const respostaCurtaDeDados = currentTxt.length <= 80 && mencionouCursoFaculdade && !/(quero|preciso|valor|pre[cç]o|prazo|pagamento|site)/i.test(currentTxt);
-
-  return { querCorrecao, querProjetoExtensao, querPronto, pediuDados, mencionouCursoFaculdade, respostaCurtaDeDados };
-}
-
-function detectarIntencaoCorrecao(texto = "") {
+function detectarPedidoLinkProduto(texto = "") {
   const txt = normalizarTexto(texto);
-  return /\b(correcao|corrigir|corrija|corrigido|revisao|revisar|formatacao|formatar|abnt|feedback|orientacoes do polo|comentario do tutor)\b/.test(txt);
-}
-
-function respostaParaCorrecao(texto, state, history = []) {
-  const txt = normalizarTexto(texto);
-  const historico = normalizarTexto((history || []).filter((m) => m.role === "user").map((m) => m.text).join("\n"));
-  const contextoCorrecao = detectarIntencaoCorrecao(`${historico}\n${texto}`) || state.awaitingCorrectionOrigin;
-  if (!contextoCorrecao) return null;
-  if (detectarPedidoLinkProduto(texto, [])) return null;
-
-  state.awaitingCorrectionOrigin = true;
-  state.lastFlowId = "correcao_trabalho";
-  state.updatedAt = Date.now();
-
-  const confirmouNosso = /\b(sim|foi|foi sim|comprei|comprei com voces|comprei com voces|foi feito por voces|feito por voces|feito com voces|pela apostileiros)\b/.test(txt);
-  const negouNosso = /\b(nao|não|nao foi|não foi|fiz fora|outro lugar|outra pessoa)\b/.test(txt);
-
-  if (confirmouNosso) {
-    return "Perfeito. Se o trabalho foi feito por nós, a correção é gratuita. 😊\n\nEnvie aqui o arquivo do trabalho e as orientações/comentários de correção do polo/tutor. Assim que receber, encaminho automaticamente para a equipe analisar.";
-  }
-
-  if (negouNosso) {
-    return "Certo. Mesmo não sendo um trabalho feito por nós, podemos analisar.\n\nEnvie o arquivo e as orientações/comentários de correção do polo/tutor. A equipe precisa avaliar antes de confirmar prazo e valor.";
-  }
-
-  return "Entendi que você precisa de correção. Primeiro preciso confirmar: esse trabalho foi feito por nós?\n\nSe foi feito conosco, a correção é gratuita. Se não foi, também podemos analisar, mas precisamos avaliar antes.\n\nPode enviar o arquivo do trabalho junto com as orientações/comentários de correção do polo/tutor.";
-}
-
-function detectarPedidoLinkProduto(texto = "", history = []) {
-  const txt = normalizarTexto(texto);
-  const historico = normalizarTexto((history || []).filter((m) => m.role === "user").map((m) => m.text).join("\n"));
-  const pediuLink = /(link|comprar|compra|carrinho|pagina|produto|site)/.test(txt);
-  const temProdutoEspecifico = /(projeto|extensao|portfolio|portifolio|tcc|atividade|pratica|relatorio|estagio|curso|faculdade|pedagogia|criminologia|enfermagem|administracao|contabeis|uninter|unopar|anhanguera|arquitetura|crime)/.test(`${historico}\n${txt}`);
-  return pediuLink && temProdutoEspecifico;
+  return /(\blink\b|comprar|compra|carrinho|pagina do produto|\bproduto\b|\bloja\b|onde (acho|encontro|compro))/.test(txt);
 }
 
 function decodeHtmlEntity(value = "") {
@@ -624,16 +577,18 @@ function decodeHtmlEntity(value = "") {
     .trim();
 }
 
-function extrairProdutosApostileiros(html = "") {
+function extrairProdutosCatalogo(html = "", linkPrefix = "") {
   const products = [];
-  const re = /\[\*\*([^\]]+)\*\*\]\((https:\/\/apostileiros\.com\.br\/produto\/[^)]+)\)/g;
+  if (!linkPrefix) return products;
+  const escapedPrefix = linkPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`\\[\\*\\*([^\\]]+)\\*\\*\\]\\((${escapedPrefix}[^)]+)\\)`, "g");
   let match;
   while ((match = re.exec(html))) {
     products.push({ title: decodeHtmlEntity(match[1]), url: match[2] });
   }
   if (products.length) return products;
 
-  const htmlRe = /<a[^>]+href=["'](https:\/\/apostileiros\.com\.br\/produto\/[^"']+)["'][^>]*>(.*?)<\/a>/gis;
+  const htmlRe = new RegExp(`<a[^>]+href=["'](${escapedPrefix}[^"']+)["'][^>]*>(.*?)</a>`, "gis");
   while ((match = htmlRe.exec(html))) {
     const title = decodeHtmlEntity(match[2]);
     if (title && !products.some((p) => p.url === match[1])) products.push({ title, url: match[1] });
@@ -646,7 +601,7 @@ function termosBuscaProduto(texto = "") {
   return normalizarTexto(texto).split(" ").filter((w) => w.length >= 3 && !stop.has(w));
 }
 
-function pontuarProdutoApostileiros(product, queryText = "") {
+function pontuarProduto(product, queryText = "") {
   const title = normalizarTexto(product.title || "");
   const url = normalizarTexto(product.url || "").replace(/-/g, " ");
   const hay = `${title} ${url}`;
@@ -654,74 +609,75 @@ function pontuarProdutoApostileiros(product, queryText = "") {
   for (const term of termosBuscaProduto(queryText)) {
     if (hay.includes(term)) score += term.length >= 7 ? 3 : 1;
   }
-  if (/projeto.*extensao/.test(normalizarTexto(queryText)) && /projeto.*extensao/.test(title)) score += 8;
-  if (/tcc/.test(normalizarTexto(queryText)) && /tcc/.test(title)) score += 8;
-  if (/portfolio|portifolio/.test(normalizarTexto(queryText)) && /portfolio|portifolio/.test(title)) score += 8;
   return score;
 }
 
-async function carregarCatalogoApostileiros(maxPages = 12) {
+// Catálogo genérico por instância: config.catalogoUrl aponta para a página de
+// listagem (padrão WooCommerce, paginação /page/N/). Links de produto são
+// reconhecidos pelo prefixo config.catalogoLinkPrefix (default: <origem>/produto/).
+function catalogoConfig(inst) {
+  const baseUrl = String(inst?.config?.catalogoUrl || "").trim().replace(/\/+$/, "");
+  if (!baseUrl) return null;
+  let linkPrefix = String(inst?.config?.catalogoLinkPrefix || "").trim();
+  if (!linkPrefix) {
+    try { linkPrefix = `${new URL(baseUrl).origin}/produto/`; } catch (_) { return null; }
+  }
+  return { baseUrl, linkPrefix };
+}
+
+async function carregarCatalogo(inst, instanceName, maxPages = 12) {
+  const cfg = catalogoConfig(inst);
+  if (!cfg) return [];
   const now = Date.now();
-  if (productCatalogCache.products.length && now - productCatalogCache.loadedAt < 6 * 60 * 60 * 1000) return productCatalogCache.products;
+  const cached = productCatalogCache.get(instanceName);
+  if (cached?.products?.length && cached.baseUrl === cfg.baseUrl && now - cached.loadedAt < 6 * 60 * 60 * 1000) {
+    return cached.products;
+  }
 
   const products = [];
   for (let page = 1; page <= maxPages; page++) {
-    const url = page === 1
-      ? "https://apostileiros.com.br/todos-nossos-produtos/"
-      : `https://apostileiros.com.br/todos-nossos-produtos/page/${page}/`;
+    const url = page === 1 ? `${cfg.baseUrl}/` : `${cfg.baseUrl}/page/${page}/`;
     try {
-      const response = await fetch(url, { headers: { "user-agent": "Mozilla/5.0 ApostileirosBot/1.0" } });
+      const response = await fetch(url, { headers: { "user-agent": "Mozilla/5.0 WhatsAIBot/1.0" } });
       if (!response.ok) continue;
       const html = await response.text();
-      for (const product of extrairProdutosApostileiros(html)) {
+      for (const product of extrairProdutosCatalogo(html, cfg.linkPrefix)) {
         if (!products.some((p) => p.url === product.url)) products.push(product);
       }
     } catch (e) {
-      console.warn(`Falha ao carregar catálogo Apostileiros ${url}:`, e.message);
+      console.warn(`[${instanceName}] Falha ao carregar catálogo ${url}:`, e.message);
     }
   }
   if (products.length) {
-    productCatalogCache.products = products;
-    productCatalogCache.loadedAt = now;
+    productCatalogCache.set(instanceName, { loadedAt: now, products, baseUrl: cfg.baseUrl });
+    return products;
   }
-  return productCatalogCache.products;
+  return cached?.products || [];
 }
 
-async function buscarProdutoApostileiros(texto, history = []) {
+async function buscarProdutoNoCatalogo(inst, instanceName, texto, history = []) {
   const queryText = [
     ...(history || []).filter((m) => m.role === "user").map((m) => m.text),
     texto,
   ].join("\n");
-  const products = await carregarCatalogoApostileiros();
+  const products = await carregarCatalogo(inst, instanceName);
   const ranked = products
-    .map((product) => ({ ...product, score: pontuarProdutoApostileiros(product, queryText) }))
+    .map((product) => ({ ...product, score: pontuarProduto(product, queryText) }))
     .filter((product) => product.score >= 10)
     .sort((a, b) => b.score - a.score);
   return ranked[0] || null;
 }
 
-async function respostaParaPedidoLinkProduto(texto, history = []) {
-  if (!detectarPedidoLinkProduto(texto, history)) return null;
-  const produto = await buscarProdutoApostileiros(texto, history);
+// Só responde de forma determinística quando encontra um produto REAL no
+// catálogo (link verdadeiro). Nos demais casos devolve null e a IA conduz
+// (com a política de links descrita na knowledgeBase da instância).
+async function respostaParaPedidoLinkProduto(inst, instanceName, texto, history = []) {
+  if (!catalogoConfig(inst)) return null;
+  if (!detectarPedidoLinkProduto(texto)) return null;
+  const produto = await buscarProdutoNoCatalogo(inst, instanceName, texto, history);
   if (produto?.url) {
-    return `Encontrei este produto na loja:\n${produto.title}\n${produto.url}\n\nConfira se é exatamente o trabalho que você precisa antes de comprar. Se não for, me diga o curso/faculdade e o nome da atividade para eu verificar melhor.`;
+    return `Encontrei este produto na loja:\n${produto.title}\n${produto.url}\n\nConfira se é exatamente o que você precisa antes de comprar. Se não for, me diga mais detalhes que eu verifico a opção mais adequada.`;
   }
-  return "Não encontrei um link específico com segurança na loja pelo que foi informado.\n\nVeja todos os produtos aqui: https://apostileiros.com.br/todos-nossos-produtos/\n\nSe quiser, envie o curso/faculdade, tipo de trabalho e tema/nome da atividade que eu verifico o link mais adequado.";
-}
-
-function respostaContextualPorHistorico(texto, history = []) {
-  const contexto = detectarContextoComercial(history, texto);
-
-  if (contexto.querCorrecao) return null;
-
-  if (contexto.querProjetoExtensao && contexto.querPronto && (contexto.mencionouCursoFaculdade || contexto.respostaCurtaDeDados)) {
-    return "Perfeito — entendi que você quer um projeto de extensão pronto. 😊\n\nTemos projeto de extensão pronto/modelo completo e editável em Word. O valor do pronto é R$ 50,00 no site, com acesso/download após confirmação do pagamento.\n\nComo você informou curso/faculdade, o próximo passo é verificar o modelo pronto mais adequado. Quer que eu te envie o link para comprar agora?";
-  }
-
-  if (contexto.pediuDados && contexto.mencionouCursoFaculdade && contexto.respostaCurtaDeDados) {
-    return "Perfeito, já ajuda. 😊\n\nPara eu te direcionar corretamente: você quer modelo pronto para comprar agora ou trabalho exclusivo sob encomenda? Se já tiver prazo final e orientações/prints do AVA, pode enviar também.";
-  }
-
   return null;
 }
 
@@ -766,6 +722,12 @@ function defaultConfig(name) {
       { id: "4", palavras: ["3", "horário", "horario", "funcionamento"], resposta: "Consulte nosso horário de atendimento. (Edite esta resposta na aba Fluxos)" },
     ],
     webhooks: [],
+    // Regras de negócio ficam SEMPRE na configuração da instância (nunca no código):
+    knowledgeBase: "",       // base de conhecimento usada pela IA
+    catalogoUrl: "",         // opcional: página de listagem de produtos (WooCommerce) p/ busca de link real
+    catalogoLinkPrefix: "",  // opcional: prefixo dos links de produto (default: <origem>/produto/)
+    respostaPadrao: "",      // fallback quando IA/fluxos não respondem
+    respostaMidia: "",       // confirmação de recebimento de arquivo/imagem quando a IA está desligada
   };
 }
 
@@ -976,7 +938,7 @@ app.post("/api/:instance/internal/test-attendant-notification", validateInstance
 
   const { instance } = req.params;
   const inst = getOrCreateInstance(instance);
-  const tipo = req.body?.tipo === "atendente" ? "atendente" : "sugestao_curso";
+  const tipo = req.body?.tipo === "midia_cliente" ? "midia_cliente" : "atendente";
   const texto = req.body?.texto || `[TESTE INTERNO] ${tipo} — ${new Date().toISOString()}`;
   const fakeMsg = {
     from: req.body?.from || "teste-interno@local",
@@ -998,7 +960,7 @@ app.post("/api/:instance/internal/test-attendant-audio", validateInstance, async
   const destinoInfo = await resolverDestinoAtendente(inst, instance);
   if (!destinoInfo.ok) return res.status(500).json(destinoInfo);
 
-  const texto = req.body?.texto || "Teste de resposta em áudio do agente Apostileiros. A transcrição e a voz estão sendo processadas localmente, sem API externa de transcrição.";
+  const texto = req.body?.texto || "Teste de resposta em áudio do agente. A transcrição e a voz estão sendo processadas localmente, sem API externa de transcrição.";
   try {
     const audio = await sintetizarAudioResposta(instance, texto);
     const sent = await sendAutomationMessage(instance, inst, destinoInfo.destino, audio, { sendAudioAsVoice: true });
@@ -1298,7 +1260,16 @@ app.post("/api/:instance/send", validateInstance, async (req, res) => {
   if (!to || !message) return res.status(400).json({ error: "Campos 'to' e 'message' são obrigatórios." });
   try {
     const chatId = to.includes("@") ? to : `${to}@s.whatsapp.net`;
-    await sendAutomationMessage(instance, inst, chatId, message);
+    const sent = await sendAutomationMessage(instance, inst, chatId, message);
+    // Registra no histórico da instância (dashboard/CRM enxergam o que as
+    // integrações externas — ex.: n8n — respondem pelos clientes).
+    saveMessageEvent(instance, {
+      key: { remoteJid: chatId, fromMe: true, id: sent?.id?._serialized || sent?.id?.id || "" },
+      message: { conversation: String(message).slice(0, 5000) },
+      messageType: "conversation",
+      messageTimestamp: Math.floor(Date.now() / 1000),
+      pushName: "Automação externa",
+    });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1483,21 +1454,10 @@ function textoContemQualquer(texto, termos) {
   return termos.some((termo) => txt.includes(normalizarTexto(termo)));
 }
 
+// Única intenção tratada no código: pedido de atendimento humano (genérica
+// para qualquer negócio). Demais intenções são responsabilidade da IA, via
+// promptSistema/knowledgeBase da instância.
 function detectarIntencaoInterna(texto) {
-  const courseTerms = [
-    "sugerir curso",
-    "sugestão de curso",
-    "sugestao de curso",
-    "sugerir um novo curso",
-    "sugerir novo curso",
-    "novo curso para a plataforma",
-    "novo curso",
-    "curso para a plataforma",
-    "curso na plataforma",
-    "indicar curso",
-    "sugiro um curso",
-    "gostaria de sugerir",
-  ];
   const humanTerms = [
     "atendente",
     "humano",
@@ -1512,7 +1472,6 @@ function detectarIntencaoInterna(texto) {
     "ligacao",
   ];
 
-  if (textoContemQualquer(texto, courseTerms)) return "sugestao_curso";
   if (textoContemQualquer(texto, humanTerms)) return "atendente";
   return null;
 }
@@ -1543,13 +1502,9 @@ async function notificarAtendente(inst, instanceName, tipo, msg, texto, options 
   const nome = msg.notifyName || contato?.pushname || contato?.name || "não informado";
   const jid = msg.from || "não informado";
   const origem = jid.endsWith("@c.us") ? `+${jid.replace("@c.us", "")}` : jid;
-  const titulo = tipo === "sugestao_curso"
-    ? "📌 Sugestão de novo curso recebida"
-    : tipo === "midia_cliente"
-      ? "📎 Cliente enviou mídia/arquivo para análise"
-      : tipo === "correcao_cliente"
-        ? "🛠️ Cliente enviou material para correção"
-        : "🚨 Cliente pediu atendimento humano";
+  const titulo = tipo === "midia_cliente"
+    ? "📎 Cliente enviou mídia/arquivo para análise"
+    : "🚨 Cliente pediu atendimento humano";
 
   const detalhesMidia = options.mediaInfo
     ? [
@@ -1683,7 +1638,7 @@ function runFfmpeg(args, timeoutMs = 90000) {
 }
 
 async function converterMp3ParaOggOpus(buffer, instanceName) {
-  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "apostileiros-audio-"));
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "whatsai-audio-"));
   const inputPath = path.join(dir, "tts.mp3");
   const outputPath = path.join(dir, "resposta.ogg");
   try {
@@ -1732,7 +1687,7 @@ async function sintetizarAudioResposta(instanceName, texto) {
     if (buffer.length < 500) throw new Error("Kokoro TTS retornou áudio vazio/pequeno demais.");
     const opusBuffer = await converterMp3ParaOggOpus(buffer, instanceName);
     console.log(`[${instanceName}] Áudio TTS gerado localmente (${buffer.length} bytes MP3) e preparado como OGG/Opus (${opusBuffer.length} bytes, voz ${KOKORO_TTS_VOICE}).`);
-    return new MessageMedia("audio/ogg; codecs=opus", opusBuffer.toString("base64"), "resposta-apostileiros.ogg");
+    return new MessageMedia("audio/ogg; codecs=opus", opusBuffer.toString("base64"), "resposta.ogg");
   } finally {
     clearTimeout(timeout);
   }
@@ -1745,11 +1700,17 @@ async function responderComAudio(instanceName, msg, resposta) {
 
 async function handleCustomerAudio(instanceName, inst, msg, chat, media, mediaInfo) {
   const textoLegenda = (msg.body || msg.caption || "").trim();
+  // O conteúdo do áudio (base64) vai no webhook para integrações externas
+  // (ex.: n8n) poderem transcrever/responder. O saveMessageEvent grava só os
+  // campos textuais — o base64 NÃO vai para o messages.jsonl.
   const incomingPayload = {
     key: { remoteJid: msg.from, fromMe: false, id: msg.id?._serialized },
     message: { conversation: textoLegenda || "[áudio recebido]" },
     messageType: "audio",
     messageTimestamp: msg.timestamp,
+    audioBase64: media?.data || null,
+    audioMimetype: media?.mimetype || "audio/ogg; codecs=opus",
+    audioFilename: media?.filename || "audio.ogg",
     ...(await getCustomerContactSnapshot(msg, inst)),
   };
   await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
@@ -1837,25 +1798,27 @@ async function handleCustomerMedia(instanceName, inst, msg, chat) {
   }
 
   const pergunta = texto || "Cliente enviou mídia/arquivo sem texto.";
-  const history = getRecentConversation(instanceName, msg.from, 8, 7 * 24 * 60 * 60 * 1000);
-  const contextoCorrecao = detectarIntencaoCorrecao(`${history.filter((m) => m.role === "user").map((m) => m.text).join("\n")}\n${texto}`);
-  const perguntaComContexto = contextoCorrecao
-    ? [
-        pergunta,
-        "",
-        "Contexto recente de correção:",
-        ...history.filter((m) => m.role === "user").slice(-4).map((m) => `- ${String(m.text || "").replace(/\n/g, " | ").slice(0, 300)}`),
-      ].join("\n")
-    : pergunta;
-  await notificarAtendente(inst, instanceName, contextoCorrecao ? "correcao_cliente" : "midia_cliente", msg, perguntaComContexto, { media, mediaInfo });
+  await notificarAtendente(inst, instanceName, "midia_cliente", msg, pergunta, { media, mediaInfo });
 
   if (inst.config.humanoAtendeu) return;
 
-  const resposta = mediaInfo.isImage
-    ? "Recebi a foto e encaminhei para a equipe verificar com segurança se temos esse item/serviço. Se puder, envie também qualquer detalhe que apareça na imagem ou o nome do que você procura."
-    : mediaInfo.isDocument
-      ? "Recebi o arquivo e encaminhei para a equipe analisar. Se puder, informe também o curso/faculdade, tipo de trabalho e prazo final para agilizar o retorno."
-      : "Recebi o anexo e encaminhei para a equipe analisar. Se puder, envie também uma mensagem explicando o que você precisa.";
+  // A confirmação de recebimento é da IA (contexto do negócio vem do
+  // promptSistema/knowledgeBase da instância); sem IA, usa config.respostaMidia.
+  let resposta = null;
+  if (inst.config.useAI) {
+    const history = getRecentConversation(instanceName, msg.from, 8, 7 * 24 * 60 * 60 * 1000);
+    const tipoDescricao = mediaInfo.isImage ? "uma imagem" : mediaInfo.isDocument ? "um documento/arquivo" : "um anexo";
+    const perguntaSintetica = [
+      `[O cliente enviou ${tipoDescricao}${mediaInfo.filename ? ` (${mediaInfo.filename})` : ""}${texto ? ` com a mensagem: "${texto}"` : " sem mensagem de texto"}.`,
+      "O arquivo já foi encaminhado para a equipe humana analisar.",
+      "Responda curto: confirme o recebimento de acordo com o contexto do negócio e peça as informações que ainda faltarem.]",
+    ].join(" ");
+    resposta = await respostaPorIA(inst, perguntaSintetica, history);
+  }
+  if (!resposta) {
+    resposta = inst.config.respostaMidia
+      || "Recebi seu arquivo e encaminhei para a equipe analisar. Se puder, envie também uma mensagem explicando o que você precisa. 😊";
+  }
 
   await delay(800);
   await chat.sendStateTyping();
@@ -1891,64 +1854,6 @@ async function respostaPorFluxo(flows, texto, state = {}) {
   return null;
 }
 
-function respostaContinuidadeSemIA(texto, state = {}) {
-  const txt = normalizarTexto(texto);
-  const sent = new Set(state.sentFlowIds || []);
-
-  if ((txt === "oi" || txt === "ola" || txt === "olá" || txt === "bom dia" || txt === "boa tarde" || txt === "boa noite") && sent.size > 0) {
-    return "Oi! 😊 Me diga como posso continuar te ajudando: trabalho pronto, trabalho exclusivo, pagamento, prazo ou outro tipo de trabalho?";
-  }
-
-  if ((txt === "ola apostileiros" || txt === "olá apostileiros") && sent.has("projeto_extensao_apostileiros_inicial")) {
-    return "Oi! Já te enviei as informações principais sobre projeto de extensão. Quer comprar o pronto, solicitar o exclusivo ou tirar alguma dúvida sobre prazo/pagamento?";
-  }
-
-  return null;
-}
-
-function respostaContextualPorEstado(texto, state = {}) {
-  const txt = normalizarTexto(texto);
-  const lastFlow = state.lastFlowId || "";
-
-  const contextoOrcamento = [
-    "trabalho_academico_orcamento_inteligente",
-    "relatorio_estagio_supervisionado",
-    "projeto_extensao_apostileiros_inicial",
-    "4",
-    "10",
-    "12",
-    "6",
-    "9",
-  ].includes(lastFlow);
-
-  if (contextoOrcamento) {
-    const temCursoOuFaculdade = /(curso|licenciatura|bacharelado|pedagogia|administracao|enfermagem|faculdade|anhanguera|unopar|pitagoras|semestre)/i.test(txt);
-    if (temCursoOuFaculdade) {
-      return "Perfeito, já ajuda. 😊\n\nPara fechar a análise do trabalho, envie também:\n• tipo de trabalho/atividade e tema\n• prazo final de postagem\n• orientações ou prints do AVA, se tiver\n\nCom isso a equipe avalia se é modelo pronto ou exclusivo e passa valor/prazo.";
-    }
-  }
-
-  return null;
-}
-
-function respostaParaTextoSolto(texto) {
-  const txt = normalizarTexto(texto);
-  if (!txt) return null;
-
-  if (/^(oi|ola|olá|bom dia|boa tarde|boa noite|menu)$/.test(txt)) return null;
-
-  if (txt.length <= 24 && txt.split(" ").length <= 3) {
-    return "Não entendi exatamente o que você precisa. 😊\n\nVocê procura trabalho pronto, trabalho exclusivo/orçamento, certificado/ACO, prazo ou pagamento?";
-  }
-
-  const termosTrabalho = ["trabalho", "atividade", "portfolio", "portifolio", "projeto", "relatorio", "estagio", "tcc", "abnt", "faculdade", "ava"];
-  if (termosTrabalho.some((termo) => txt.includes(termo))) {
-    return "Podemos ajudar com modelos prontos e trabalhos exclusivos sob encomenda.\n\nPara orientar melhor, envie: curso/faculdade, tipo de trabalho, tema ou disciplina, prazo final e orientações do AVA.";
-  }
-
-  return null;
-}
-
 async function respostaPorIA(inst, texto, history = []) {
   const aiClient = inst.aiClient || inst.groqClient;
   const ai = normalizeAiConfig(inst.config || {});
@@ -1956,7 +1861,7 @@ async function respostaPorIA(inst, texto, history = []) {
   try {
     const sysContent = [
       inst.config.promptSistema || "Você é um assistente prestativo.",
-      "\n\nNunca responda uma mensagem curta isolada sem considerar o contexto recente da conversa. Se o cliente já pediu projeto de extensão pronto e depois enviou curso/faculdade, continue esse atendimento e indique o projeto de extensão pronto em vez de reiniciar perguntas.",
+      "\n\nConsidere sempre o contexto recente da conversa antes de responder: continue o assunto em andamento, não reinicie perguntas já respondidas e não trate mensagens curtas como conversas novas.",
       inst.config.knowledgeBase?.trim()
         ? `\n\n=== BASE DE CONHECIMENTO DO NEGÓCIO ===\n${inst.config.knowledgeBase}`
         : ""
@@ -2016,47 +1921,40 @@ function scheduleBufferedResponse(instanceName, msg, chat, texto) {
   pendingResponses.set(key, item);
 }
 
+// Pipeline de resposta 100% genérico (multi-tenant). A ordem é:
+// 1. intenção de atendimento humano (avisa o atendente, genérica);
+// 2. fluxos por palavra-chave (config da instância, aba Fluxos);
+// 3. catálogo de produtos (opcional, config.catalogoUrl — só link REAL);
+// 4. IA com histórico + promptSistema + knowledgeBase (o coração);
+// 5. fallback neutro (config.respostaPadrao).
+// Regras específicas de cada negócio NÃO entram aqui — vivem na config.
 async function gerarRespostaParaTexto(instanceName, inst, msg, texto) {
   const stateKey = `${instanceName}:${msg.from}`;
   const state = conversationState.get(stateKey) || {};
   const history = getRecentConversation(instanceName, msg.from);
-  let intencaoInterna = detectarIntencaoInterna(texto);
-  if (!intencaoInterna && state.pendingCourseSuggestion) {
-    intencaoInterna = "sugestao_curso";
-    state.pendingCourseSuggestion = false;
-  }
-  if (intencaoInterna === "sugestao_curso") {
-    await notificarAtendente(inst, instanceName, "sugestao_curso", msg, texto);
-    state.pendingCourseSuggestion = true;
-    state.updatedAt = Date.now();
-    conversationState.set(stateKey, state);
-  } else if (intencaoInterna === "atendente") {
+
+  if (detectarIntencaoInterna(texto) === "atendente") {
     await notificarAtendente(inst, instanceName, "atendente", msg, texto);
     state.pendingHumanRequest = true;
     state.updatedAt = Date.now();
     conversationState.set(stateKey, state);
   }
 
-  let resposta = respostaParaCorrecao(texto, state, history);
-  if (resposta) conversationState.set(stateKey, state);
-  if (!resposta) resposta = await respostaParaPedidoLinkProduto(texto, history);
-  if (!resposta) resposta = respostaContinuidadeSemIA(texto, state);
-  if (!resposta) resposta = respostaContextualPorHistorico(texto, history);
-  if (!resposta) resposta = respostaContextualPorEstado(texto, state);
-  let fluxoMatch = null;
-  if (!resposta) {
-    fluxoMatch = await respostaPorFluxo(inst.config.flows, texto, state);
-    resposta = fluxoMatch?.resposta || null;
-  }
+  let fluxoMatch = await respostaPorFluxo(inst.config.flows, texto, state);
+  let resposta = fluxoMatch?.resposta || null;
   if (fluxoMatch?.flow?.id) {
     state.sentFlowIds = Array.from(new Set([...(state.sentFlowIds || []), fluxoMatch.flow.id]));
     state.lastFlowId = fluxoMatch.flow.id;
     state.updatedAt = Date.now();
     conversationState.set(stateKey, state);
   }
-  if (!resposta) resposta = respostaParaTextoSolto(texto);
+
+  if (!resposta) resposta = await respostaParaPedidoLinkProduto(inst, instanceName, texto, history);
   if (!resposta && inst.config.useAI) resposta = await respostaPorIA(inst, texto, history);
-  if (!resposta) resposta = "Me envie mais detalhes para eu te orientar melhor.";
+  if (!resposta) {
+    resposta = inst.config.respostaPadrao
+      || "Recebi sua mensagem! Pode me dar mais detalhes do que você precisa? Se preferir falar com um atendente, é só pedir. 😊";
+  }
   return resposta;
 }
 
