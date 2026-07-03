@@ -30,6 +30,8 @@ const LOCAL_STT_URL = process.env.LOCAL_STT_URL || "http://whisper-stt:8000/tran
 const KOKORO_TTS_URL = process.env.KOKORO_TTS_URL || "http://kokoro:8880/v1/audio/speech";
 const KOKORO_TTS_VOICE = process.env.KOKORO_TTS_VOICE || "pf_dora";
 const KOKORO_TTS_MODEL = process.env.KOKORO_TTS_MODEL || "kokoro";
+const MANUAL_PAUSE_MS = Number(process.env.MANUAL_PAUSE_MS || 24 * 60 * 60 * 1000);
+const AUTOMATION_OUTGOING_GRACE_MS = Number(process.env.AUTOMATION_OUTGOING_GRACE_MS || 120000);
 
 if (!fs.existsSync(INSTANCES_DIR)) fs.mkdirSync(INSTANCES_DIR, { recursive: true });
 
@@ -83,7 +85,9 @@ const pendingResponses = new Map();
 const instanceDir = (name) => path.join(INSTANCES_DIR, name);
 const configPath  = (name) => path.join(instanceDir(name), "config.json");
 const crmPath     = (name) => path.join(instanceDir(name), "crm.json");
+const manualPausesPath = (name) => path.join(instanceDir(name), "manual-pauses.json");
 const delay       = (ms)   => new Promise((r) => setTimeout(r, ms));
+const automatedOutgoing = new Map();
 
 function readJsonFileSafe(filePath, fallback) {
   try {
@@ -98,6 +102,92 @@ function writeJsonFileAtomic(filePath, data) {
   const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
   fs.renameSync(tmp, filePath);
+}
+
+function loadManualPauses(instanceName) {
+  const data = readJsonFileSafe(manualPausesPath(instanceName), { customers: {} });
+  return data && typeof data === "object" && data.customers && typeof data.customers === "object"
+    ? data
+    : { customers: {} };
+}
+
+function saveManualPauses(instanceName, pauses) {
+  const dir = instanceDir(instanceName);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  writeJsonFileAtomic(manualPausesPath(instanceName), {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    customers: pauses.customers || {},
+  });
+}
+
+function cleanupManualPauses(instanceName, pauses = loadManualPauses(instanceName), now = Date.now()) {
+  let changed = false;
+  for (const [jid, data] of Object.entries(pauses.customers || {})) {
+    const pausedUntil = Number(data?.pausedUntil || 0);
+    if (!pausedUntil || pausedUntil <= now) {
+      delete pauses.customers[jid];
+      changed = true;
+    }
+  }
+  if (changed) saveManualPauses(instanceName, pauses);
+  return pauses;
+}
+
+function pauseAutomationForCustomer(instanceName, remoteJid, reason = "manual_whatsapp_outbound") {
+  const jid = normalizeCustomerJid(remoteJid);
+  if (!jid) return null;
+  const now = Date.now();
+  const pauses = cleanupManualPauses(instanceName, loadManualPauses(instanceName), now);
+  const pausedUntil = now + MANUAL_PAUSE_MS;
+  pauses.customers[jid] = {
+    remoteJid: jid,
+    reason,
+    pausedAt: new Date(now).toISOString(),
+    pausedUntil,
+    pausedUntilIso: new Date(pausedUntil).toISOString(),
+  };
+  saveManualPauses(instanceName, pauses);
+  return pauses.customers[jid];
+}
+
+function isAutomationPausedForCustomer(instanceName, remoteJid) {
+  const jid = normalizeCustomerJid(remoteJid);
+  if (!jid) return false;
+  const now = Date.now();
+  const pauses = cleanupManualPauses(instanceName, loadManualPauses(instanceName), now);
+  return Number(pauses.customers?.[jid]?.pausedUntil || 0) > now;
+}
+
+function markAutomationOutgoing(instanceName, remoteJid) {
+  const jid = normalizeCustomerJid(remoteJid);
+  if (!jid) return;
+  const key = `${instanceName}:${jid}`;
+  automatedOutgoing.set(key, Date.now() + AUTOMATION_OUTGOING_GRACE_MS);
+}
+
+function isMarkedAutomationOutgoing(instanceName, remoteJid) {
+  const jid = normalizeCustomerJid(remoteJid);
+  if (!jid) return false;
+  const key = `${instanceName}:${jid}`;
+  const until = Number(automatedOutgoing.get(key) || 0);
+  if (until > Date.now()) return true;
+  automatedOutgoing.delete(key);
+  return false;
+}
+
+async function sendAutomationMessage(instanceName, inst, remoteJid, content, options) {
+  markAutomationOutgoing(instanceName, remoteJid);
+  const sent = await inst.whatsappClient.sendMessage(remoteJid, content, options);
+  markAutomationOutgoing(instanceName, remoteJid);
+  return sent;
+}
+
+async function replyWithAutomation(instanceName, msg, content, options) {
+  markAutomationOutgoing(instanceName, msg.from);
+  const sent = await msg.reply(content, undefined, options);
+  markAutomationOutgoing(instanceName, msg.from);
+  return sent;
 }
 
 function normalizeCustomerJid(remoteJid = "") {
@@ -773,7 +863,7 @@ app.post("/api/:instance/internal/test-attendant-audio", validateInstance, async
   const texto = req.body?.texto || "Teste de resposta em áudio do agente Apostileiros. A transcrição e a voz estão sendo processadas localmente, sem API externa de transcrição.";
   try {
     const audio = await sintetizarAudioResposta(instance, texto);
-    const sent = await inst.whatsappClient.sendMessage(destinoInfo.destino, audio, { sendAudioAsVoice: true });
+    const sent = await sendAutomationMessage(instance, inst, destinoInfo.destino, audio, { sendAudioAsVoice: true });
     const messageId = sent?.id?._serialized || sent?.id?.id || "";
     saveMessageEvent(instance, {
       key: { remoteJid: destinoInfo.destino, fromMe: true, id: messageId },
@@ -1070,7 +1160,7 @@ app.post("/api/:instance/send", validateInstance, async (req, res) => {
   if (!to || !message) return res.status(400).json({ error: "Campos 'to' e 'message' são obrigatórios." });
   try {
     const chatId = to.includes("@") ? to : `${to}@s.whatsapp.net`;
-    await inst.whatsappClient.sendMessage(chatId, message);
+    await sendAutomationMessage(instance, inst, chatId, message);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1221,6 +1311,7 @@ function initWhatsApp(instanceName, force = false) {
     }
   });
 
+  inst.whatsappClient.on("message_create", (msg) => handleManualOutboundMessage(instanceName, msg));
   inst.whatsappClient.on("message", (msg) => handleMessage(instanceName, msg));
 
   inst.whatsappClient.initialize()
@@ -1344,7 +1435,7 @@ async function notificarAtendente(inst, instanceName, tipo, msg, texto, options 
   ].join("\n");
 
   try {
-    const sent = await inst.whatsappClient.sendMessage(destino, textoInterno);
+    const sent = await sendAutomationMessage(instanceName, inst, destino, textoInterno);
     const messageId = sent?.id?._serialized || sent?.id?.id || "";
     saveMessageEvent(instanceName, {
       key: { remoteJid: destino, fromMe: true, id: messageId },
@@ -1356,7 +1447,7 @@ async function notificarAtendente(inst, instanceName, tipo, msg, texto, options 
     if (options.media) {
       try {
         const mediaCaption = `Arquivo enviado pelo cliente ${nome} (${origem}) para análise.`;
-        const sentMedia = await inst.whatsappClient.sendMessage(destino, options.media, { caption: mediaCaption });
+        const sentMedia = await sendAutomationMessage(instanceName, inst, destino, options.media, { caption: mediaCaption });
         mediaMessageId = sentMedia?.id?._serialized || sentMedia?.id?.id || "";
         saveMessageEvent(instanceName, {
           key: { remoteJid: destino, fromMe: true, id: mediaMessageId },
@@ -1509,7 +1600,7 @@ async function sintetizarAudioResposta(instanceName, texto) {
 
 async function responderComAudio(instanceName, msg, resposta) {
   const audio = await sintetizarAudioResposta(instanceName, resposta);
-  await msg.reply(audio, undefined, { sendAudioAsVoice: true });
+  await replyWithAutomation(instanceName, msg, audio, { sendAudioAsVoice: true });
 }
 
 async function handleCustomerAudio(instanceName, inst, msg, chat, media, mediaInfo) {
@@ -1524,6 +1615,10 @@ async function handleCustomerAudio(instanceName, inst, msg, chat, media, mediaIn
   await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
   saveMessageEvent(instanceName, incomingPayload);
 
+  if (isAutomationPausedForCustomer(instanceName, msg.from)) {
+    console.log(`[${instanceName}] Automação pausada para ${msg.from}; áudio recebido apenas registrado.`);
+    return;
+  }
   if (inst.config.humanoAtendeu) return;
 
   await chat.sendStateRecording();
@@ -1533,7 +1628,7 @@ async function handleCustomerAudio(instanceName, inst, msg, chat, media, mediaIn
   } catch (e) {
     console.error(`[${instanceName}] Falha na transcrição local do áudio:`, e.message);
     const fallback = "Não consegui entender esse áudio com segurança. Pode reenviar falando mais perto do microfone ou mandar por texto?";
-    await msg.reply(fallback);
+    await replyWithAutomation(instanceName, msg, fallback);
     const outgoingPayload = {
       key: { remoteJid: msg.from, fromMe: true },
       message: { conversation: fallback },
@@ -1556,7 +1651,7 @@ async function handleCustomerAudio(instanceName, inst, msg, chat, media, mediaIn
     await responderComAudio(instanceName, msg, resposta);
   } catch (e) {
     console.error(`[${instanceName}] Falha ao enviar resposta em áudio; enviando texto:`, e.message);
-    await msg.reply(resposta);
+    await replyWithAutomation(instanceName, msg, resposta);
   }
 
   const outgoingPayload = {
@@ -1596,6 +1691,11 @@ async function handleCustomerMedia(instanceName, inst, msg, chat) {
   await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
   saveMessageEvent(instanceName, incomingPayload);
 
+  if (isAutomationPausedForCustomer(instanceName, msg.from)) {
+    console.log(`[${instanceName}] Automação pausada para ${msg.from}; mídia recebida apenas registrada.`);
+    return;
+  }
+
   const pergunta = texto || "Cliente enviou mídia/arquivo sem texto.";
   await notificarAtendente(inst, instanceName, "midia_cliente", msg, pergunta, { media, mediaInfo });
 
@@ -1610,7 +1710,7 @@ async function handleCustomerMedia(instanceName, inst, msg, chat) {
   await delay(800);
   await chat.sendStateTyping();
   await delay(1200);
-  await msg.reply(resposta);
+  await replyWithAutomation(instanceName, msg, resposta);
 
   const outgoingPayload = {
     key: { remoteJid: msg.from, fromMe: true },
@@ -1760,7 +1860,7 @@ function scheduleBufferedResponse(instanceName, msg, chat, texto) {
     pendingResponses.delete(key);
     processBufferedCustomerText(item).catch((e) => {
       console.error(`[${instanceName}] Erro ao processar buffer de mensagem:`, e);
-      try { item.msg.reply("Ocorreu um erro. Tente novamente em instantes."); } catch (_) {}
+      try { replyWithAutomation(instanceName, item.msg, "Ocorreu um erro. Tente novamente em instantes."); } catch (_) {}
     });
   }, delayMs);
   pendingResponses.set(key, item);
@@ -1821,10 +1921,14 @@ async function processBufferedCustomerText(item) {
   }
 
   const typing = async () => { await delay(800); await chat.sendStateTyping(); await delay(1200); };
+  if (isAutomationPausedForCustomer(instanceName, msg.from)) {
+    console.log(`[${instanceName}] Automação pausada para ${msg.from}; buffer textual descartado sem resposta automática.`);
+    return;
+  }
   const resposta = await gerarRespostaParaTexto(instanceName, inst, msg, texto);
 
   await typing();
-  await msg.reply(resposta);
+  await replyWithAutomation(instanceName, msg, resposta);
 
   const outgoingPayload = {
     key: { remoteJid: msg.from, fromMe: true },
@@ -1834,6 +1938,35 @@ async function processBufferedCustomerText(item) {
   };
   await dispatchWebhook(instanceName, "messages.upsert", outgoingPayload);
   saveMessageEvent(instanceName, outgoingPayload);
+}
+
+async function handleManualOutboundMessage(instanceName, msg) {
+  try {
+    const fromMe = !!(msg?.fromMe || msg?.id?.fromMe);
+    if (!fromMe) return;
+
+    const remoteJid = normalizeCustomerJid(msg.to || msg.id?.remote || msg.from || "");
+    if (!remoteJid) return;
+
+    if (isMarkedAutomationOutgoing(instanceName, remoteJid)) return;
+
+    const existing = pendingResponses.get(`${instanceName}:${remoteJid}`);
+    if (existing?.timer) clearTimeout(existing.timer);
+    pendingResponses.delete(`${instanceName}:${remoteJid}`);
+
+    const pause = pauseAutomationForCustomer(instanceName, remoteJid);
+    const texto = (msg.body || msg.caption || "[mensagem manual enviada pelo WhatsApp]").trim();
+    saveMessageEvent(instanceName, {
+      key: { remoteJid, fromMe: true, id: msg.id?._serialized || msg.id?.id || "" },
+      message: { conversation: texto },
+      messageType: msg.type || "conversation",
+      messageTimestamp: msg.timestamp || Math.floor(Date.now() / 1000),
+      pushName: "Atendimento humano",
+    });
+    console.log(`[${instanceName}] Atendimento manual detectado para ${remoteJid}; automação pausada até ${pause?.pausedUntilIso || "24h"}.`);
+  } catch (e) {
+    console.error(`[${instanceName}] Erro ao detectar atendimento manual:`, e.message);
+  }
 }
 
 async function handleMessage(instanceName, msg) {
@@ -1863,11 +1996,11 @@ async function handleMessage(instanceName, msg) {
     await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
     saveMessageEvent(instanceName, incomingPayload);
 
-    if (inst.config.humanoAtendeu) return;
+    if (inst.config.humanoAtendeu || isAutomationPausedForCustomer(instanceName, msg.from)) return;
     scheduleBufferedResponse(instanceName, msg, chat, texto);
   } catch (e) {
     console.error(`[${instanceName}] Erro ao processar mensagem:`, e);
-    try { await msg.reply("Ocorreu um erro. Tente novamente em instantes."); } catch (_) {}
+    try { await replyWithAutomation(instanceName, msg, "Ocorreu um erro. Tente novamente em instantes."); } catch (_) {}
   }
 }
 
