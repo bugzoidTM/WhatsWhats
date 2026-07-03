@@ -663,7 +663,7 @@ async function buscarProdutoNoCatalogo(inst, instanceName, texto, history = []) 
   const products = await carregarCatalogo(inst, instanceName);
   const ranked = products
     .map((product) => ({ ...product, score: pontuarProduto(product, queryText) }))
-    .filter((product) => product.score >= 10)
+    .filter((product) => product.score >= 8)
     .sort((a, b) => b.score - a.score);
   return ranked[0] || null;
 }
@@ -1449,9 +1449,19 @@ function normalizarTexto(texto) {
     .trim();
 }
 
+// Termo só casa a partir de fronteira de palavra (evita falso positivo por
+// substring — ex.: "aco" dentro de "faco"). O fim fica aberto de propósito
+// para plurais/variações ("curso" casa "cursos").
+function contemTermo(txtNormalizado, termo) {
+  const key = normalizarTexto(termo);
+  if (!key) return false;
+  const esc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^| )${esc}`).test(txtNormalizado);
+}
+
 function textoContemQualquer(texto, termos) {
   const txt = normalizarTexto(texto);
-  return termos.some((termo) => txt.includes(normalizarTexto(termo)));
+  return termos.some((termo) => contemTermo(txt, termo));
 }
 
 // Única intenção tratada no código: pedido de atendimento humano (genérica
@@ -1847,8 +1857,7 @@ async function respostaPorFluxo(flows, texto, state = {}) {
     }
 
     for (const p of flow.palavras || []) {
-      const key = normalizarTexto(p);
-      if (key && (txt.includes(key) || txt === key)) return { resposta: flow.resposta, flow };
+      if (contemTermo(txt, p)) return { resposta: flow.resposta, flow };
     }
   }
   return null;
