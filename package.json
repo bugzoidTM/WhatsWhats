@@ -9,8 +9,10 @@
     "test:manual-pause": "node scripts/test-manual-pause-contract.mjs",
     "test:multitenant": "node scripts/test-multitenant-contract.mjs",
     "test:media-ack": "node scripts/test-media-ack-contract.mjs",
-    "test": "node --check server.js && npm run test:manual-pause && npm run test:multitenant && npm run test:media-ack && npm run test:flow-context",
-    "test:flow-context": "node scripts/test-flow-context-contract.mjs"
+    "test": "node --check server.js && npm run test:manual-pause && npm run test:multitenant && npm run test:media-ack && npm run test:flow-context && npm run test:audio-links && npm run test:recovery",
+    "test:flow-context": "node scripts/test-flow-context-contract.mjs",
+    "test:audio-links": "node scripts/test-audio-links-contract.mjs",
+    "test:recovery": "node scripts/test-recovery-contract.mjs"
   },
   "dependencies": {
     "express": "^4.18.2",

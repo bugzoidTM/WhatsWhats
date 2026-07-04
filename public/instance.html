@@ -495,6 +495,50 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
           <span id="base-status" style="font-size:0.82rem; color:var(--text-muted);"></span>
         </div>
       </div>
+
+      <div class="card">
+        <h2>👥 Atendimento humano &amp; Recuperação</h2>
+        <p class="dica">
+          O <strong>WhatsApp do atendente</strong> recebe os avisos internos (arquivos de clientes, pedido de atendente,
+          respostas de recuperação). A <strong>recuperação</strong> reengaja conversas paradas: sem intervenção humana,
+          após ~24h de silêncio o bot pergunta se ficou dúvida; se o cliente responder, agradece, avisa o atendente e encerra.
+        </p>
+        <div class="form-group">
+          <label>WhatsApp do atendente (obrigatório para avisos internos)</label>
+          <input type="text" id="attendantWhatsApp" placeholder="Só números, com DDI e DDD. Ex.: 5511999998888">
+        </div>
+        <div class="form-group">
+          <label style="cursor:pointer; display:flex; align-items:center; gap:10px;">
+            <input type="checkbox" id="recuperacaoAtiva">
+            <span>🔄 <strong>Recuperar conversas paradas</strong> — follow-up automático após ~24h sem resposta e sem humano na conversa</span>
+          </label>
+        </div>
+        <div class="form-group">
+          <label>Mensagem de recuperação (vazio = padrão neutro)</label>
+          <input type="text" id="recuperacaoMensagem" placeholder="Oi! 👋 Ficou alguma dúvida? Há algo mais em que possamos ajudar?">
+        </div>
+        <div class="form-group">
+          <label>Resposta quando o cliente responde à recuperação (vazio = padrão neutro)</label>
+          <input type="text" id="recuperacaoEncerramento" placeholder="Obrigado pelo retorno! Vou levar sua mensagem para um atendente.">
+        </div>
+        <div class="form-group">
+          <label>Confirmação de recebimento de arquivo/mídia (vazio = IA/padrão neutro)</label>
+          <input type="text" id="respostaMidia" placeholder="Recebemos seu material! Vamos analisar e em breve retornamos.">
+        </div>
+        <div class="form-group">
+          <label style="cursor:pointer; display:flex; align-items:center; gap:10px;">
+            <input type="checkbox" id="pausaAposMidia">
+            <span>📎 <strong>Pausar automação após arquivo</strong> — confirma 1x, encaminha ao atendente e o humano assume</span>
+          </label>
+        </div>
+        <div class="form-group">
+          <label>Resposta padrão quando IA/fluxos não respondem (vazio = padrão neutro)</label>
+          <input type="text" id="respostaPadrao" placeholder="Recebi sua mensagem! Pode me dar mais detalhes?">
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+          <button class="btn btn-primary" id="salvarAtendimento">💾 Salvar Atendimento</button>
+        </div>
+      </div>
     </div>
 
     <!-- Aba CRM -->
@@ -733,6 +777,13 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
         $('maxTokens').value = cfg.maxTokens || 220;
         $('humanoAtendeu').checked = !!cfg.humanoAtendeu;
         $('humano-box').classList.toggle('ativo', !!cfg.humanoAtendeu);
+        $('attendantWhatsApp').value = cfg.attendantWhatsApp || '';
+        $('recuperacaoAtiva').checked = !!cfg.recuperacaoAtiva;
+        $('recuperacaoMensagem').value = cfg.recuperacaoMensagem || '';
+        $('recuperacaoEncerramento').value = cfg.recuperacaoEncerramento || '';
+        $('respostaMidia').value = cfg.respostaMidia || '';
+        $('pausaAposMidia').checked = !!cfg.pausaAposMidia;
+        $('respostaPadrao').value = cfg.respostaPadrao || '';
         if (cfg.knowledgeBase !== undefined) $('knowledgeBase').value = cfg.knowledgeBase || '';
         updateKbCount();
         renderFluxos(cfg.flows || []);
@@ -752,6 +803,13 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
         model: $('modeloGroq').value.trim(),
         maxTokens: Number($('maxTokens').value || 220),
         promptSistema: $('promptSistema').value.trim(),
+        attendantWhatsApp: $('attendantWhatsApp').value.replace(/\D/g, ''),
+        recuperacaoAtiva: $('recuperacaoAtiva').checked,
+        recuperacaoMensagem: $('recuperacaoMensagem').value.trim(),
+        recuperacaoEncerramento: $('recuperacaoEncerramento').value.trim(),
+        respostaMidia: $('respostaMidia').value.trim(),
+        pausaAposMidia: $('pausaAposMidia').checked,
+        respostaPadrao: $('respostaPadrao').value.trim(),
         ...extra,
       };
       const r = await fetch(API('/config'), {
@@ -767,6 +825,10 @@ Entrega: Sim, raio de 5km, taxa R$ 5,00"
     });
     $('salvarModelo').addEventListener('click', async () => {
       try { await salvarConfig(); toast('✅ Modelo e prompt salvos!'); }
+      catch (e) { toast('Erro ao salvar.', 'err'); }
+    });
+    $('salvarAtendimento').addEventListener('click', async () => {
+      try { await salvarConfig(); toast('✅ Atendimento e recuperação salvos!'); }
       catch (e) { toast('Erro ao salvar.', 'err'); }
     });
 

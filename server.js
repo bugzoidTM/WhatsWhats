@@ -31,6 +31,9 @@ const KOKORO_TTS_URL = process.env.KOKORO_TTS_URL || "http://kokoro:8880/v1/audi
 const KOKORO_TTS_VOICE = process.env.KOKORO_TTS_VOICE || "pf_dora";
 const KOKORO_TTS_MODEL = process.env.KOKORO_TTS_MODEL || "kokoro";
 const MANUAL_PAUSE_MS = Number(process.env.MANUAL_PAUSE_MS || 24 * 60 * 60 * 1000);
+const RECOVERY_SCAN_INTERVAL_MS = Number(process.env.RECOVERY_SCAN_INTERVAL_MS || 10 * 60 * 1000);
+const RECOVERY_DEFAULT_AFTER_MS = 24 * 60 * 60 * 1000;   // silêncio até o follow-up
+const RECOVERY_DEFAULT_MAX_AGE_MS = 72 * 60 * 60 * 1000; // conversa mais velha que isso não recebe follow-up
 const AUTOMATION_OUTGOING_GRACE_MS = Number(process.env.AUTOMATION_OUTGOING_GRACE_MS || 120000);
 
 if (!fs.existsSync(INSTANCES_DIR)) fs.mkdirSync(INSTANCES_DIR, { recursive: true });
@@ -89,6 +92,7 @@ const instanceDir = (name) => path.join(INSTANCES_DIR, name);
 const configPath  = (name) => path.join(instanceDir(name), "config.json");
 const crmPath     = (name) => path.join(instanceDir(name), "crm.json");
 const manualPausesPath = (name) => path.join(instanceDir(name), "manual-pauses.json");
+const recoveryStatePath = (name) => path.join(instanceDir(name), "recovery-state.json");
 const delay       = (ms)   => new Promise((r) => setTimeout(r, ms));
 const automatedOutgoing = new Map();
 // Catálogo de produtos por instância (feature opcional: config.catalogoUrl).
@@ -733,6 +737,13 @@ function defaultConfig(name) {
     respostaMidia: "",       // confirmação de recebimento de arquivo/imagem; quando preenchida, tem prioridade sobre a IA
     pausaAposMidia: false,   // ao receber arquivo p/ análise: confirma 1x, pausa a automação e deixa o humano assumir
     pausaAposMidiaMs: 0,     // duração da pausa acima (0 = mesma janela do atendimento manual)
+    attendantWhatsApp: "",   // WhatsApp do atendente humano (avisos internos); sem ele não há notificações
+    // Recuperação de conversas paradas (follow-up automático):
+    recuperacaoAtiva: false,     // liga o follow-up de conversas em silêncio sem intervenção humana
+    recuperacaoAposMs: 0,        // silêncio até o follow-up (0 = 24h)
+    recuperacaoJanelaMaxMs: 0,   // idade máxima da conversa para ainda receber follow-up (0 = 72h)
+    recuperacaoMensagem: "",     // texto do follow-up (vazio = padrão neutro)
+    recuperacaoEncerramento: "", // resposta quando o cliente responde ao follow-up (vazio = padrão neutro)
   };
 }
 
@@ -1492,7 +1503,8 @@ function detectarIntencaoInterna(texto) {
 }
 
 async function resolverDestinoAtendente(inst, instanceName) {
-  const numero = (inst.config.attendantWhatsApp || "5573999921633").replace(/\D/g, "");
+  // Sem fallback hardcoded: o WhatsApp do atendente é config da instância (attendantWhatsApp).
+  const numero = String(inst.config.attendantWhatsApp || "").replace(/\D/g, "");
   if (!numero) return { ok: false, error: "attendantWhatsApp não configurado" };
   if (!inst.whatsappClient || !inst.connected) return { ok: false, error: "WhatsApp da instância não está conectado" };
 
@@ -1511,15 +1523,28 @@ async function notificarAtendente(inst, instanceName, tipo, msg, texto, options 
   if (!destinoInfo.ok) return destinoInfo;
   const destino = destinoInfo.destino;
 
-  let contato = null;
-  try { contato = await msg.getContact(); } catch (_) {}
-
-  const nome = msg.notifyName || contato?.pushname || contato?.name || "não informado";
+  // Resolve o número REAL do cliente (jids @lid não são telefone): snapshot do
+  // contato (inclui Store/LID) e, em último caso, o CRM da instância.
+  const snapshot = await getCustomerContactSnapshot(msg, inst);
   const jid = msg.from || "não informado";
-  const origem = jid.endsWith("@c.us") ? `+${jid.replace("@c.us", "")}` : jid;
+  let telefone = bestCustomerPhone(snapshot, jid);
+  if (!telefone) {
+    try {
+      const crm = loadCrm(instanceName);
+      telefone = cleanPhoneNumber(crm.contacts.find((c) => c.remoteJid === jid)?.phone || "");
+    } catch (_) {}
+  }
+
+  const nome = msg.notifyName || bestCustomerName(snapshot) || "não informado";
+  const origem = telefone ? `+${telefone}` : jid;
+  const contatoLinhas = telefone
+    ? [`WhatsApp: +${telefone}`, `Conversar: https://wa.me/${telefone}`]
+    : [`Contato/JID: ${jid}`];
   const titulo = tipo === "midia_cliente"
     ? "📎 Cliente enviou mídia/arquivo para análise"
-    : "🚨 Cliente pediu atendimento humano";
+    : tipo === "recuperacao_cliente_respondeu"
+      ? "🔄 Cliente respondeu à mensagem de recuperação"
+      : "🚨 Cliente pediu atendimento humano";
 
   const detalhesMidia = options.mediaInfo
     ? [
@@ -1536,7 +1561,7 @@ async function notificarAtendente(inst, instanceName, tipo, msg, texto, options 
     "",
     `Instância: ${instanceName}`,
     `Cliente: ${nome}`,
-    `Contato/JID: ${origem}`,
+    ...contatoLinhas,
     `Data: ${new Date().toLocaleString("pt-BR", { timeZone: "America/Bahia" })}`,
     "",
     "Mensagem do cliente:",
@@ -1713,6 +1738,31 @@ async function responderComAudio(instanceName, msg, resposta) {
   await replyWithAutomation(instanceName, msg, audio, { sendAudioAsVoice: true });
 }
 
+// WhatsApp não renderiza Markdown: [rótulo](url) vira "rótulo: url" em texto puro.
+function desfazerLinksMarkdown(texto = "") {
+  return String(texto).replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1: $2");
+}
+
+// Link nunca é falado em áudio: separa as URLs (vão como mensagem de texto,
+// clicáveis) do que sobra para ser falado.
+function separarLinksDoTexto(texto = "") {
+  const links = [];
+  const guardar = (url) => links.push(url.replace(/[).,;!?]+$/, ""));
+  let falado = desfazerLinksMarkdown(texto)
+    // "…loja: https://x" / "site —https://x": o separador vira ponto final na fala
+    .replace(/\s*[:\-–—]\s*(https?:\/\/[^\s]+)/g, (m, url) => { guardar(url); return "."; })
+    .replace(/https?:\/\/[^\s]+/g, (url) => { guardar(url); return ""; });
+  falado = falado
+    .replace(/[ \t]+([.,;:!?])/g, "$1")
+    .replace(/\.{2,}/g, ".")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/^[ \t]*[-•:.][ \t]*$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .replace(/[:\-–—]\s*$/, ".");
+  return { falado, links: [...new Set(links)] };
+}
+
 async function handleCustomerAudio(instanceName, inst, msg, chat, media, mediaInfo) {
   const textoLegenda = (msg.body || msg.caption || "").trim();
   // O conteúdo do áudio (base64) vai no webhook para integrações externas
@@ -1759,20 +1809,40 @@ async function handleCustomerAudio(instanceName, inst, msg, chat, media, mediaIn
   const textoParaAgente = textoLegenda
     ? `${textoLegenda}\n\nTranscrição do áudio: ${transcricao}`
     : transcricao;
+  if (await tratarRespostaDeRecuperacao(instanceName, inst, msg, textoParaAgente)) return;
   const resposta = await gerarRespostaParaTexto(instanceName, inst, msg, textoParaAgente);
+
+  // Links nunca são falados: vão ANTES, como texto (clicáveis); o áudio segue
+  // depois só com a fala — se sobrar fala que valha a pena.
+  const { falado, links } = separarLinksDoTexto(resposta);
+  if (links.length) {
+    const textoLinks = links.join("\n");
+    await replyWithAutomation(instanceName, msg, textoLinks);
+    const linksPayload = {
+      key: { remoteJid: msg.from, fromMe: true },
+      message: { conversation: textoLinks },
+      messageType: "conversation",
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    };
+    await dispatchWebhook(instanceName, "messages.upsert", linksPayload);
+    saveMessageEvent(instanceName, linksPayload);
+  }
+
+  const fala = falado || (links.length ? "" : String(resposta || "").trim());
+  if (!fala) return;
 
   await delay(700);
   await chat.sendStateRecording();
   try {
-    await responderComAudio(instanceName, msg, resposta);
+    await responderComAudio(instanceName, msg, fala);
   } catch (e) {
     console.error(`[${instanceName}] Falha ao enviar resposta em áudio; enviando texto:`, e.message);
-    await replyWithAutomation(instanceName, msg, resposta);
+    await replyWithAutomation(instanceName, msg, fala);
   }
 
   const outgoingPayload = {
     key: { remoteJid: msg.from, fromMe: true },
-    message: { conversation: `[resposta em áudio] ${resposta}` },
+    message: { conversation: `[resposta em áudio] ${fala}` },
     messageType: "audio",
     messageTimestamp: Math.floor(Date.now() / 1000),
   };
@@ -1814,6 +1884,7 @@ async function handleCustomerMedia(instanceName, inst, msg, chat) {
 
   const pergunta = texto || "Cliente enviou mídia/arquivo sem texto.";
   await notificarAtendente(inst, instanceName, "midia_cliente", msg, pergunta, { media, mediaInfo });
+  fecharRecuperacaoSePendente(instanceName, msg.from);
 
   if (inst.config.humanoAtendeu) return;
 
@@ -1965,6 +2036,7 @@ async function respostaPorIA(inst, texto, history = []) {
     const sysContent = [
       inst.config.promptSistema || "Você é um assistente prestativo.",
       "\n\nConsidere sempre o contexto recente da conversa antes de responder: continue o assunto em andamento, não reinicie perguntas já respondidas e não trate mensagens curtas como conversas novas.",
+      "\nEsta conversa é no WhatsApp, que não renderiza Markdown: nunca use links em formato [texto](url) — escreva sempre a URL pura.",
       inst.config.knowledgeBase?.trim()
         ? `\n\n=== BASE DE CONHECIMENTO DO NEGÓCIO ===\n${inst.config.knowledgeBase}`
         : ""
@@ -1985,7 +2057,8 @@ async function respostaPorIA(inst, texto, history = []) {
       max_tokens: Number(inst.config.maxTokens || 180),
       temperature: 0.25,
     });
-    return completion.choices?.[0]?.message?.content?.trim() || null;
+    const conteudo = completion.choices?.[0]?.message?.content?.trim() || null;
+    return conteudo ? desfazerLinksMarkdown(conteudo) : null;
   } catch (e) {
     console.error("Erro IA:", e.message);
     return null;
@@ -2091,6 +2164,7 @@ async function processBufferedCustomerText(item) {
     console.log(`[${instanceName}] Automação pausada para ${msg.from}; buffer textual descartado sem resposta automática.`);
     return;
   }
+  if (await tratarRespostaDeRecuperacao(instanceName, inst, msg, texto)) return;
   const resposta = await gerarRespostaParaTexto(instanceName, inst, msg, texto);
 
   await typing();
@@ -2104,6 +2178,164 @@ async function processBufferedCustomerText(item) {
   };
   await dispatchWebhook(instanceName, "messages.upsert", outgoingPayload);
   saveMessageEvent(instanceName, outgoingPayload);
+}
+
+// =====================================
+// RECUPERAÇÃO DE CONVERSAS PARADAS (por instância, genérico)
+// Se NENHUM humano interveio e o cliente ficou em silêncio, o bot envia UM
+// follow-up perguntando se ficou dúvida. Se o cliente responder: agradece,
+// avisa o atendente e ENCERRA (pausa a automação — o humano assume).
+// Textos vêm da config da instância; os defaults são neutros, sem regra de negócio.
+// =====================================
+
+function loadRecoveryState(instanceName) {
+  const data = readJsonFileSafe(recoveryStatePath(instanceName), { customers: {} });
+  return data && typeof data === "object" && data.customers && typeof data.customers === "object"
+    ? data
+    : { customers: {} };
+}
+
+function saveRecoveryState(instanceName, state) {
+  const dir = instanceDir(instanceName);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  writeJsonFileAtomic(recoveryStatePath(instanceName), {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    customers: state.customers || {},
+  });
+}
+
+function recoveryConfig(inst) {
+  const cfg = inst.config || {};
+  return {
+    ativa: !!cfg.recuperacaoAtiva,
+    aposMs: Number(cfg.recuperacaoAposMs) || RECOVERY_DEFAULT_AFTER_MS,
+    janelaMaxMs: Number(cfg.recuperacaoJanelaMaxMs) || RECOVERY_DEFAULT_MAX_AGE_MS,
+    mensagem: String(cfg.recuperacaoMensagem || "").trim()
+      || "Oi! 👋 Passando para saber se ficou alguma dúvida ou se há algo mais em que possamos ajudar. Estamos por aqui! 😊",
+    encerramento: String(cfg.recuperacaoEncerramento || "").trim()
+      || "Obrigado pelo retorno! 🙏 Vou levar sua mensagem para um atendente, que continua o atendimento por aqui. Até já!",
+  };
+}
+
+// Follow-up só em horário razoável para o cliente (America/Bahia, 8h às 20h59).
+function dentroDoHorarioDeRecuperacao(now = new Date()) {
+  const hora = Number(now.toLocaleString("pt-BR", { timeZone: "America/Bahia", hour: "2-digit", hour12: false }));
+  return hora >= 8 && hora < 21;
+}
+
+function coletarAtividadePorCliente(instanceName, janelaTotalMs) {
+  const map = new Map();
+  try {
+    const filePath = path.join(instanceDir(instanceName), "messages.jsonl");
+    if (!fs.existsSync(filePath)) return map;
+    const cutoff = Date.now() - janelaTotalMs;
+    for (const line of fs.readFileSync(filePath, "utf8").split("\n")) {
+      if (!line) continue;
+      let r;
+      try { r = JSON.parse(line); } catch (_) { continue; }
+      const jid = normalizeCustomerJid(r.remoteJid || "");
+      if (!jid || jid.endsWith("@broadcast")) continue;
+      const ts = Number(r.timestamp || 0);
+      if (!ts || ts < cutoff) continue;
+      const cur = map.get(jid) || { lastAt: 0, lastHumanAt: 0, temMensagemDoCliente: false };
+      if (ts > cur.lastAt) cur.lastAt = ts;
+      if (r.fromMe && r.pushName === "Atendimento humano" && ts > cur.lastHumanAt) cur.lastHumanAt = ts;
+      if (!r.fromMe) cur.temMensagemDoCliente = true;
+      map.set(jid, cur);
+    }
+  } catch (e) {
+    console.error(`[${instanceName}] Erro ao coletar atividade para recuperação:`, e.message);
+  }
+  return map;
+}
+
+async function scanRecoveryFollowups() {
+  if (!dentroDoHorarioDeRecuperacao()) return;
+  for (const instanceName of listInstanceNames()) {
+    try {
+      const inst = getOrCreateInstance(instanceName);
+      const rec = recoveryConfig(inst);
+      if (!rec.ativa || inst.config.humanoAtendeu) continue;
+      if (!inst.connected || !inst.whatsappClient) continue;
+
+      // O chat do atendente nunca recebe follow-up.
+      const destinoInfo = await resolverDestinoAtendente(inst, instanceName);
+      const jidsAtendente = new Set();
+      if (destinoInfo.ok) jidsAtendente.add(destinoInfo.destino);
+      const numeroAtendente = String(inst.config.attendantWhatsApp || "").replace(/\D/g, "");
+      if (numeroAtendente) jidsAtendente.add(`${numeroAtendente}@c.us`);
+
+      const atividade = coletarAtividadePorCliente(instanceName, rec.aposMs + rec.janelaMaxMs);
+      const state = loadRecoveryState(instanceName);
+      const now = Date.now();
+      let mudou = false;
+
+      for (const [jid, info] of atividade) {
+        if (jidsAtendente.has(jid)) continue;
+        if (!info.temMensagemDoCliente) continue;
+        const silencio = now - info.lastAt;
+        if (silencio < rec.aposMs || silencio > rec.janelaMaxMs) continue;
+        if (info.lastHumanAt) continue; // humano interveio nessa janela — não é caso do bot
+        if (isAutomationPausedForCustomer(instanceName, jid)) continue;
+        const entry = state.customers[jid];
+        if (entry && Number(entry.sentAt || 0) >= info.lastAt) continue; // esta parada já teve follow-up
+
+        await sendAutomationMessage(instanceName, inst, jid, rec.mensagem);
+        const payload = {
+          key: { remoteJid: jid, fromMe: true },
+          message: { conversation: rec.mensagem },
+          messageType: "conversation",
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        };
+        await dispatchWebhook(instanceName, "messages.upsert", payload);
+        saveMessageEvent(instanceName, payload);
+        state.customers[jid] = { sentAt: Date.now(), sentAtIso: new Date().toISOString(), status: "sent" };
+        mudou = true;
+        console.log(`[${instanceName}] Recuperação: follow-up enviado para ${jid} após ${Math.round(silencio / 3600000)}h de silêncio.`);
+      }
+      if (mudou) saveRecoveryState(instanceName, state);
+    } catch (e) {
+      console.error(`[${instanceName}] Erro no ciclo de recuperação:`, e.message);
+    }
+  }
+}
+
+// Cliente respondeu ao follow-up: agradece, avisa o atendente e encerra
+// (pausa a automação para o humano assumir a conversa).
+async function tratarRespostaDeRecuperacao(instanceName, inst, msg, texto) {
+  const state = loadRecoveryState(instanceName);
+  const entry = state.customers?.[msg.from];
+  if (!entry || entry.status !== "sent") return false;
+
+  const rec = recoveryConfig(inst);
+  await replyWithAutomation(instanceName, msg, rec.encerramento);
+  const payload = {
+    key: { remoteJid: msg.from, fromMe: true },
+    message: { conversation: rec.encerramento },
+    messageType: "conversation",
+    messageTimestamp: Math.floor(Date.now() / 1000),
+  };
+  await dispatchWebhook(instanceName, "messages.upsert", payload);
+  saveMessageEvent(instanceName, payload);
+
+  await notificarAtendente(inst, instanceName, "recuperacao_cliente_respondeu", msg, texto);
+  pauseAutomationForCustomer(instanceName, msg.from, "recuperacao_encerrada");
+  state.customers[msg.from] = { ...entry, status: "closed", closedAt: Date.now(), closedAtIso: new Date().toISOString() };
+  saveRecoveryState(instanceName, state);
+  console.log(`[${instanceName}] Recuperação: ${msg.from} respondeu ao follow-up; atendente avisado e automação pausada.`);
+  return true;
+}
+
+// Mídia após follow-up: o fluxo de mídia já avisa o atendente; aqui só fechamos
+// o ciclo de recuperação para o scanner não reenviar follow-up.
+function fecharRecuperacaoSePendente(instanceName, remoteJid) {
+  const state = loadRecoveryState(instanceName);
+  const entry = state.customers?.[remoteJid];
+  if (!entry || entry.status !== "sent") return false;
+  state.customers[remoteJid] = { ...entry, status: "closed", closedAt: Date.now(), closedAtIso: new Date().toISOString() };
+  saveRecoveryState(instanceName, state);
+  return true;
 }
 
 async function handleManualOutboundMessage(instanceName, msg) {
@@ -2209,6 +2441,11 @@ server.listen(PORT, HOST, () => {
 ║  Libere TCP ${PORT} no firewall da VPS                     ║
 ╚══════════════════════════════════════════════════════════╝
   `);
+
+  // Recuperação de conversas paradas: varredura periódica (por instância, opt-in via config).
+  setInterval(() => {
+    scanRecoveryFollowups().catch((e) => console.error("Erro na varredura de recuperação:", e.message));
+  }, RECOVERY_SCAN_INTERVAL_MS);
 
   // CORREÇÃO: Carregar e iniciar automaticamente todas as instâncias existentes
   const existentes = listInstanceNames();
