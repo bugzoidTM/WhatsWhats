@@ -1929,14 +1929,32 @@ async function respostaPorFluxo(flows, texto, state = {}) {
     if (flow.oncePerChat && sent.has(flow.id)) continue;
 
     for (const p of flow.exactPhrases || []) {
-      if (txt === normalizarTexto(p)) return { resposta: flow.resposta, flow };
+      if (txt === normalizarTexto(p)) return { resposta: flow.resposta, flow, matchType: "exact" };
     }
 
     for (const p of flow.palavras || []) {
-      if (contemTermo(txt, p)) return { resposta: flow.resposta, flow };
+      if (contemTermo(txt, p)) return { resposta: flow.resposta, flow, matchType: "keyword" };
     }
   }
   return null;
+}
+
+// A última fala do bot nesta conversa foi uma pergunta ainda sem resposta dele?
+// (o histórico já contém a mensagem atual do cliente — por isso procuramos a
+// última mensagem do assistente, não a última do array)
+function hasPendingAssistantQuestion(history = []) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role === "assistant") return String(history[i].text || "").trim().endsWith("?");
+  }
+  return false;
+}
+
+function registrarFluxoUsado(stateKey, state, fluxoMatch) {
+  if (!fluxoMatch?.flow?.id) return;
+  state.sentFlowIds = Array.from(new Set([...(state.sentFlowIds || []), fluxoMatch.flow.id]));
+  state.lastFlowId = fluxoMatch.flow.id;
+  state.updatedAt = Date.now();
+  conversationState.set(stateKey, state);
 }
 
 async function respostaPorIA(inst, texto, history = []) {
@@ -2008,7 +2026,10 @@ function scheduleBufferedResponse(instanceName, msg, chat, texto) {
 
 // Pipeline de resposta 100% genérico (multi-tenant). A ordem é:
 // 1. intenção de atendimento humano (avisa o atendente, genérica);
-// 2. fluxos por palavra-chave (config da instância, aba Fluxos);
+// 2. fluxos (config da instância, aba Fluxos) — frase exata sempre vale;
+//    fluxo por PALAVRA-CHAVE só vale para mensagem "fria": se a última fala do
+//    bot foi uma pergunta, a mensagem do cliente é a resposta dela e quem trata
+//    é a IA (que tem o histórico); o fluxo vira rede de segurança se a IA falhar;
 // 3. catálogo de produtos (opcional, config.catalogoUrl — só link REAL);
 // 4. IA com histórico + promptSistema + knowledgeBase (o coração);
 // 5. fallback neutro (config.respostaPadrao).
@@ -2025,17 +2046,26 @@ async function gerarRespostaParaTexto(instanceName, inst, msg, texto) {
     conversationState.set(stateKey, state);
   }
 
-  let fluxoMatch = await respostaPorFluxo(inst.config.flows, texto, state);
-  let resposta = fluxoMatch?.resposta || null;
-  if (fluxoMatch?.flow?.id) {
-    state.sentFlowIds = Array.from(new Set([...(state.sentFlowIds || []), fluxoMatch.flow.id]));
-    state.lastFlowId = fluxoMatch.flow.id;
-    state.updatedAt = Date.now();
-    conversationState.set(stateKey, state);
+  const fluxoMatch = await respostaPorFluxo(inst.config.flows, texto, state);
+  const ai = normalizeAiConfig(inst.config || {});
+  const aiDisponivel = !!(inst.config.useAI && (inst.aiClient || inst.groqClient) && ai.apiKey);
+  const deferirFluxoParaIA = fluxoMatch?.matchType === "keyword"
+    && aiDisponivel
+    && hasPendingAssistantQuestion(history);
+
+  let resposta = null;
+  if (fluxoMatch && !deferirFluxoParaIA) {
+    resposta = fluxoMatch.resposta;
+    registrarFluxoUsado(stateKey, state, fluxoMatch);
   }
 
   if (!resposta) resposta = await respostaParaPedidoLinkProduto(inst, instanceName, texto, history);
   if (!resposta && inst.config.useAI) resposta = await respostaPorIA(inst, texto, history);
+  if (!resposta && deferirFluxoParaIA) {
+    // IA indisponível/falhou: a resposta do fluxo ainda é melhor que o fallback neutro.
+    resposta = fluxoMatch.resposta;
+    registrarFluxoUsado(stateKey, state, fluxoMatch);
+  }
   if (!resposta) {
     resposta = inst.config.respostaPadrao
       || "Recebi sua mensagem! Pode me dar mais detalhes do que você precisa? Se preferir falar com um atendente, é só pedir. 😊";
