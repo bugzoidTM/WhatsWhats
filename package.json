@@ -7,7 +7,9 @@
     "start": "node server.js",
     "instalar": "npm install",
     "test:manual-pause": "node scripts/test-manual-pause-contract.mjs",
-    "test:correction-product": "node scripts/test-correction-product-contract.mjs"
+    "test:multitenant": "node scripts/test-multitenant-contract.mjs",
+    "test:media-ack": "node scripts/test-media-ack-contract.mjs",
+    "test": "node --check server.js && npm run test:manual-pause && npm run test:multitenant && npm run test:media-ack"
   },
   "dependencies": {
     "express": "^4.18.2",

@@ -78,6 +78,9 @@ if (isSetupMode()) {
 const instances = new Map();
 const conversationState = new Map();
 const pendingResponses = new Map();
+// Rajadas de mídia (vários arquivos seguidos do mesmo cliente) geram UMA só
+// confirmação de recebimento, nunca uma resposta por arquivo.
+const pendingMediaAcks = new Map();
 
 // =====================================
 // HELPERS
@@ -136,12 +139,12 @@ function cleanupManualPauses(instanceName, pauses = loadManualPauses(instanceNam
   return pauses;
 }
 
-function pauseAutomationForCustomer(instanceName, remoteJid, reason = "manual_whatsapp_outbound") {
+function pauseAutomationForCustomer(instanceName, remoteJid, reason = "manual_whatsapp_outbound", durationMs = MANUAL_PAUSE_MS) {
   const jid = normalizeCustomerJid(remoteJid);
   if (!jid) return null;
   const now = Date.now();
   const pauses = cleanupManualPauses(instanceName, loadManualPauses(instanceName), now);
-  const pausedUntil = now + MANUAL_PAUSE_MS;
+  const pausedUntil = now + Math.max(60 * 1000, Number(durationMs) || MANUAL_PAUSE_MS);
   pauses.customers[jid] = {
     remoteJid: jid,
     reason,
@@ -727,7 +730,9 @@ function defaultConfig(name) {
     catalogoUrl: "",         // opcional: página de listagem de produtos (WooCommerce) p/ busca de link real
     catalogoLinkPrefix: "",  // opcional: prefixo dos links de produto (default: <origem>/produto/)
     respostaPadrao: "",      // fallback quando IA/fluxos não respondem
-    respostaMidia: "",       // confirmação de recebimento de arquivo/imagem quando a IA está desligada
+    respostaMidia: "",       // confirmação de recebimento de arquivo/imagem; quando preenchida, tem prioridade sobre a IA
+    pausaAposMidia: false,   // ao receber arquivo p/ análise: confirma 1x, pausa a automação e deixa o humano assumir
+    pausaAposMidiaMs: 0,     // duração da pausa acima (0 = mesma janela do atendimento manual)
   };
 }
 
@@ -1812,22 +1817,78 @@ async function handleCustomerMedia(instanceName, inst, msg, chat) {
 
   if (inst.config.humanoAtendeu) return;
 
-  // A confirmação de recebimento é da IA (contexto do negócio vem do
-  // promptSistema/knowledgeBase da instância); sem IA, usa config.respostaMidia.
-  let resposta = null;
-  if (inst.config.useAI) {
+  // A confirmação de recebimento é agrupada por rajada: vários arquivos
+  // seguidos geram UMA resposta só (nunca uma resposta por arquivo).
+  scheduleMediaAck(instanceName, msg, chat, mediaInfo, texto);
+}
+
+function getMediaAckDelayMs(inst) {
+  return Math.max(5000, Number(inst.config.mediaAckDelayMs || inst.config.responseDelayMs || 9000));
+}
+
+function scheduleMediaAck(instanceName, msg, chat, mediaInfo, texto) {
+  const inst = getOrCreateInstance(instanceName);
+  const key = `${instanceName}:${msg.from}`;
+  const existing = pendingMediaAcks.get(key);
+  if (existing?.timer) clearTimeout(existing.timer);
+
+  const item = existing || { files: [], texts: [], firstAt: Date.now() };
+  item.files.push(mediaInfo);
+  if (texto && !item.files.some((f) => f.filename === texto)) item.texts.push(texto);
+  item.msg = msg;
+  item.chat = chat;
+  item.instanceName = instanceName;
+  item.updatedAt = Date.now();
+
+  item.timer = setTimeout(() => {
+    pendingMediaAcks.delete(key);
+    processMediaAckBurst(item).catch((e) => {
+      console.error(`[${instanceName}] Erro ao confirmar recebimento de mídia:`, e);
+    });
+  }, getMediaAckDelayMs(inst));
+  pendingMediaAcks.set(key, item);
+}
+
+// Uma rajada de arquivos => UMA confirmação de recebimento. Prioridade:
+// 1. config.respostaMidia (determinística, controlada pelo negócio);
+// 2. IA (promptSistema + knowledgeBase) com instrução genérica;
+// 3. fallback neutro.
+// Com config.pausaAposMidia ligado, após confirmar a automação PAUSA para o
+// cliente e o atendimento passa para a equipe humana (que já recebeu os arquivos).
+async function processMediaAckBurst(item) {
+  const { instanceName, msg, chat } = item;
+  const inst = getOrCreateInstance(instanceName);
+
+  // O estado pode ter mudado durante a janela da rajada.
+  if (isAutomationPausedForCustomer(instanceName, msg.from)) return;
+  if (inst.config.humanoAtendeu) return;
+
+  const pausarDepois = !!inst.config.pausaAposMidia;
+  const nomes = item.files.map((f) => f.filename).filter(Boolean);
+  const legenda = item.texts.join("\n").trim();
+
+  let resposta = String(inst.config.respostaMidia || "").trim() || null;
+
+  if (!resposta && inst.config.useAI) {
     const history = getRecentConversation(instanceName, msg.from, 8, 7 * 24 * 60 * 60 * 1000);
-    const tipoDescricao = mediaInfo.isImage ? "uma imagem" : mediaInfo.isDocument ? "um documento/arquivo" : "um anexo";
+    const qtd = item.files.length;
+    const descricao = qtd === 1
+      ? `1 arquivo/anexo${nomes[0] ? ` (${nomes[0]})` : ""}`
+      : `${qtd} arquivos/anexos${nomes.length ? ` (${nomes.join(", ")})` : ""}`;
     const perguntaSintetica = [
-      `[O cliente enviou ${tipoDescricao}${mediaInfo.filename ? ` (${mediaInfo.filename})` : ""}${texto ? ` com a mensagem: "${texto}"` : " sem mensagem de texto"}.`,
-      "O arquivo já foi encaminhado para a equipe humana analisar.",
-      "Responda curto: confirme o recebimento de acordo com o contexto do negócio e peça as informações que ainda faltarem.]",
+      `[O cliente enviou ${descricao}${legenda ? ` com a mensagem: "${legenda}"` : ", sem mensagem de texto"}.`,
+      "Tudo já foi encaminhado para a equipe humana analisar.",
+      pausarDepois
+        ? "Responda curto, em UMA mensagem só: confirme o recebimento e diga que a equipe vai analisar e retorna em breve por aqui. Não faça perguntas nem peça mais nada agora.]"
+        : "Responda curto, em UMA mensagem só: confirme o recebimento de acordo com o contexto do negócio e peça as informações que ainda faltarem.]",
     ].join(" ");
     resposta = await respostaPorIA(inst, perguntaSintetica, history);
   }
+
   if (!resposta) {
-    resposta = inst.config.respostaMidia
-      || "Recebi seu arquivo e encaminhei para a equipe analisar. Se puder, envie também uma mensagem explicando o que você precisa. 😊";
+    resposta = pausarDepois
+      ? "Recebi seu material e encaminhei para a equipe analisar. Em breve entraremos em contato por aqui. 😊"
+      : "Recebi seu arquivo e encaminhei para a equipe analisar. Se puder, envie também uma mensagem explicando o que você precisa. 😊";
   }
 
   await delay(800);
@@ -1843,6 +1904,21 @@ async function handleCustomerMedia(instanceName, inst, msg, chat) {
   };
   await dispatchWebhook(instanceName, "messages.upsert", outgoingPayload);
   saveMessageEvent(instanceName, outgoingPayload);
+
+  if (pausarDepois) {
+    const pause = pauseAutomationForCustomer(
+      instanceName,
+      msg.from,
+      "midia_encaminhada_para_analise",
+      Number(inst.config.pausaAposMidiaMs) || MANUAL_PAUSE_MS
+    );
+    // Texto pendente no buffer também passa a ser assunto do humano.
+    const pendingKey = `${instanceName}:${msg.from}`;
+    const pendingText = pendingResponses.get(pendingKey);
+    if (pendingText?.timer) clearTimeout(pendingText.timer);
+    pendingResponses.delete(pendingKey);
+    console.log(`[${instanceName}] Mídia encaminhada para análise; automação pausada para ${msg.from} até ${pause?.pausedUntilIso || "janela padrão"}.`);
+  }
 }
 
 async function respostaPorFluxo(flows, texto, state = {}) {
@@ -2013,6 +2089,10 @@ async function handleManualOutboundMessage(instanceName, msg) {
     const existing = pendingResponses.get(`${instanceName}:${remoteJid}`);
     if (existing?.timer) clearTimeout(existing.timer);
     pendingResponses.delete(`${instanceName}:${remoteJid}`);
+
+    const existingMedia = pendingMediaAcks.get(`${instanceName}:${remoteJid}`);
+    if (existingMedia?.timer) clearTimeout(existingMedia.timer);
+    pendingMediaAcks.delete(`${instanceName}:${remoteJid}`);
 
     const pause = pauseAutomationForCustomer(instanceName, remoteJid);
     const texto = (msg.body || msg.caption || "[mensagem manual enviada pelo WhatsApp]").trim();
