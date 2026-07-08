@@ -1953,7 +1953,8 @@ async function processMediaAckBurst(item) {
         ? "Responda curto, em UMA mensagem só: confirme o recebimento e diga que a equipe vai analisar e retorna em breve por aqui. Não faça perguntas nem peça mais nada agora.]"
         : "Responda curto, em UMA mensagem só: confirme o recebimento de acordo com o contexto do negócio e peça as informações que ainda faltarem.]",
     ].join(" ");
-    resposta = await respostaPorIA(inst, perguntaSintetica, history);
+    // O atendente já é sempre avisado no fluxo de mídia; aqui só limpamos a marca.
+    resposta = separarMarcaAtendente(await respostaPorIA(inst, perguntaSintetica, history)).texto;
   }
 
   if (!resposta) {
@@ -2035,8 +2036,10 @@ async function respostaPorIA(inst, texto, history = []) {
   try {
     const sysContent = [
       inst.config.promptSistema || "Você é um assistente prestativo.",
-      "\n\nConsidere sempre o contexto recente da conversa antes de responder: continue o assunto em andamento, não reinicie perguntas já respondidas e não trate mensagens curtas como conversas novas.",
+      "\n\nConsidere sempre o contexto recente da conversa antes de responder: continue o assunto em andamento, não reinicie perguntas já respondidas e não trate mensagens curtas como conversas novas. O cliente às vezes responde citando/repetindo a sua mensagem anterior e preenchendo as respostas no meio do texto (por exemplo em negrito, logo após cada pergunta): leia com atenção e aproveite os dados que ele já informou; nunca peça de novo o que já foi respondido.",
       "\nEsta conversa é no WhatsApp, que não renderiza Markdown: nunca use links em formato [texto](url) — escreva sempre a URL pura.",
+      "\nLimites do canal: você atende apenas por mensagens de texto neste WhatsApp. Você NÃO envia e-mails, não faz ligações, não acessa outros sistemas e não envia por conta própria chaves PIX, dados bancários, boletos, comprovantes ou links de pagamento — isso é feito por um atendente humano. Nunca prometa fazer nada disso, nunca peça o e-mail do cliente para enviar pagamento e nunca diga que enviou algo por e-mail.",
+      "\nAcionar atendente humano: quando (e só quando) for preciso um atendente — o cliente confirmou que quer pagar/fechar o pedido, pediu falar com uma pessoa, ou surgiu algo fora do seu alcance — responda de forma curta que um atendente vai concluir por aqui mesmo no WhatsApp (por exemplo, enviar a chave PIX) e peça que aguarde um instante; e acrescente a marca [ATENDENTE] ao final da resposta. Essa marca é removida antes do envio e serve apenas para avisar a equipe — nunca a explique ao cliente.",
       inst.config.knowledgeBase?.trim()
         ? `\n\n=== BASE DE CONHECIMENTO DO NEGÓCIO ===\n${inst.config.knowledgeBase}`
         : ""
@@ -2097,6 +2100,19 @@ function scheduleBufferedResponse(instanceName, msg, chat, texto) {
   pendingResponses.set(key, item);
 }
 
+// A IA pode acrescentar a marca [ATENDENTE] à resposta para acionar um humano
+// (ver instrução no prompt). Aqui a marca é SEMPRE removida antes de enviar ao
+// cliente; `acionar` diz se a equipe deve ser avisada. Genérico (multi-tenant).
+function separarMarcaAtendente(resposta) {
+  if (!resposta) return { texto: resposta, acionar: false };
+  const acionar = /\[\s*ATENDENTE\s*\]/i.test(resposta);
+  const texto = resposta
+    .replace(/\[\s*ATENDENTE\s*\]/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return { texto, acionar };
+}
+
 // Pipeline de resposta 100% genérico (multi-tenant). A ordem é:
 // 1. intenção de atendimento humano (avisa o atendente, genérica);
 // 2. fluxos (config da instância, aba Fluxos) — frase exata sempre vale;
@@ -2142,6 +2158,17 @@ async function gerarRespostaParaTexto(instanceName, inst, msg, texto) {
   if (!resposta) {
     resposta = inst.config.respostaPadrao
       || "Recebi sua mensagem! Pode me dar mais detalhes do que você precisa? Se preferir falar com um atendente, é só pedir. 😊";
+  }
+
+  // A IA pode ter pedido handoff via marca [ATENDENTE]: remove a marca e avisa o
+  // atendente uma vez por conversa (dedup por state.pendingHumanRequest).
+  const { texto: respostaLimpa, acionar } = separarMarcaAtendente(resposta);
+  resposta = respostaLimpa || resposta;
+  if (acionar && !state.pendingHumanRequest) {
+    await notificarAtendente(inst, instanceName, "atendente", msg, texto);
+    state.pendingHumanRequest = true;
+    state.updatedAt = Date.now();
+    conversationState.set(stateKey, state);
   }
   return resposta;
 }
