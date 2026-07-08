@@ -847,7 +847,10 @@ async function dispatchWebhook(instanceName, event, data) {
     try {
       const headers = { "Content-Type": "application/json" };
       if (wh.token) headers["Authorization"] = `Bearer ${wh.token}`;
-      await fetch(wh.url, { method: "POST", headers, body: JSON.stringify(payload), signal: controller.signal });
+      const resposta = await fetch(wh.url, { method: "POST", headers, body: JSON.stringify(payload), signal: controller.signal });
+      if (!resposta.ok) {
+        console.error(`[${instanceName}] Webhook ${wh.url} respondeu HTTP ${resposta.status} (evento ${event})`);
+      }
     } catch (e) {
       console.error(`[${instanceName}] Webhook error → ${wh.url}: ${e.message}`);
     } finally {
@@ -1111,15 +1114,20 @@ app.get("/api/:instance/messages", validateInstance, (req, res) => {
     }
     const content = fs.readFileSync(filePath, "utf8");
     const lines = content.trim().split("\n");
+    // Filtros opcionais p/ integrações: ?jid=<remoteJid> e ?limit=<n> (máx. 1000).
+    const jid = String(req.query.jid || "").trim();
+    const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 200));
+    // Varredura limitada para não travar o event loop com arquivos grandes:
+    // com ?jid= olha no máximo as últimas 20k linhas; sem filtro, só <limit>.
+    const inicio = Math.max(0, lines.length - (jid ? 20000 : limit));
     const messages = [];
-    const limit = 200;
-    const startIndex = Math.max(0, lines.length - limit);
-    for (let i = lines.length - 1; i >= startIndex; i--) {
-      if (lines[i].trim()) {
-        try {
-          messages.push(JSON.parse(lines[i]));
-        } catch (_) {}
-      }
+    for (let i = lines.length - 1; i >= inicio && messages.length < limit; i--) {
+      if (!lines[i].trim()) continue;
+      try {
+        const record = JSON.parse(lines[i]);
+        if (jid && record.remoteJid !== jid) continue;
+        messages.push(record);
+      } catch (_) {}
     }
     res.json(messages);
   } catch (e) {
@@ -1860,6 +1868,11 @@ async function handleCustomerMedia(instanceName, inst, msg, chat) {
     mediaInfo = classificarMidiaCliente(msg, media);
   } catch (e) {
     console.error(`[${instanceName}] Erro ao baixar mídia recebida de ${msg.from}:`, e.message);
+    // Mesmo sem o download, classifica pelo tipo da mensagem — o messageType
+    // do webhook não pode mudar de vocabulário (ex.: "image" vs "imagem").
+    // isAudio fica false de propósito: sem conteúdo não há o que transcrever,
+    // então o áudio falho segue o caminho genérico (que notifica o atendente).
+    try { mediaInfo = { ...classificarMidiaCliente(msg, null), isAudio: false }; } catch (_) {}
   }
 
   if (mediaInfo.isAudio) {
@@ -1867,15 +1880,29 @@ async function handleCustomerMedia(instanceName, inst, msg, chat) {
     return;
   }
 
+  // O conteúdo da mídia (base64) vai no webhook para integrações externas
+  // (ex.: n8n) poderem analisar imagem/documento. O saveMessageEvent grava só
+  // os campos textuais — o base64 NÃO vai para o messages.jsonl.
+  // Mídia acima do teto não vai em base64 (payload gigante estoura o
+  // consumidor — o n8n rejeita >16MB); o evento sai com mediaOmitida: true.
+  const tetoConfig = Number(inst.config.webhookMediaMaxBase64 ?? 8000000);
+  // Config inválida (ex.: "8M") não pode desligar o base64 em silêncio.
+  const tetoBase64 = Number.isFinite(tetoConfig) ? Math.max(0, tetoConfig) : 8000000;
+  const base64Cabe = !!(media?.data && media.data.length <= tetoBase64);
   const incomingPayload = {
     key: { remoteJid: msg.from, fromMe: false, id: msg.id?._serialized },
     message: { conversation: texto || `[${mediaInfo.tipo} recebida]` },
     messageType: mediaInfo.tipo,
     messageTimestamp: msg.timestamp,
+    mediaBase64: base64Cabe ? media.data : null,
+    mediaMimetype: media?.mimetype || "",
+    mediaFilename: media?.filename || "",
+    mediaOmitida: !!(media?.data && !base64Cabe),
     ...(await getCustomerContactSnapshot(msg, inst)),
   };
-  await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
+  // Histórico primeiro; o webhook (aguardado, como sempre foi) vem depois.
   saveMessageEvent(instanceName, incomingPayload);
+  await dispatchWebhook(instanceName, "messages.upsert", incomingPayload);
 
   if (isAutomationPausedForCustomer(instanceName, msg.from)) {
     console.log(`[${instanceName}] Automação pausada para ${msg.from}; mídia recebida apenas registrada.`);
@@ -2385,13 +2412,22 @@ async function handleManualOutboundMessage(instanceName, msg) {
 
     const pause = pauseAutomationForCustomer(instanceName, remoteJid);
     const texto = (msg.body || msg.caption || "[mensagem manual enviada pelo WhatsApp]").trim();
-    saveMessageEvent(instanceName, {
+    // Mensagem manual do atendente também vai ao webhook (integrações
+    // externas, ex.: n8n); antes só entrava no histórico local.
+    const manualPayload = {
       key: { remoteJid, fromMe: true, id: msg.id?._serialized || msg.id?.id || "" },
       message: { conversation: texto },
       messageType: msg.type || "conversation",
       messageTimestamp: msg.timestamp || Math.floor(Date.now() / 1000),
       pushName: "Atendimento humano",
-    });
+    };
+    // Histórico primeiro (nunca pode se perder/atrasar por causa de rede);
+    // webhook em seguida, sem await, e só para conversa de cliente —
+    // status@broadcast, canais e afins ficam de fora.
+    saveMessageEvent(instanceName, manualPayload);
+    if (/@(c\.us|lid|s\.whatsapp\.net)$/.test(remoteJid)) {
+      dispatchWebhook(instanceName, "messages.upsert", manualPayload).catch(() => {});
+    }
     console.log(`[${instanceName}] Atendimento manual detectado para ${remoteJid}; automação pausada até ${pause?.pausedUntilIso || "24h"}.`);
   } catch (e) {
     console.error(`[${instanceName}] Erro ao detectar atendimento manual:`, e.message);
