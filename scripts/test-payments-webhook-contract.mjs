@@ -58,4 +58,9 @@ const disp = source.slice(source.indexOf('async function dispatchWebhook'));
 const dispFn = disp.slice(0, disp.indexOf('\n}'));
 assert.match(dispFn, /resposta\.ok/, 'non-2xx webhook responses must be logged');
 
+// 6) POST /send resolve número cru/@c.us via getNumberId (contas LID).
+const send = source.slice(source.indexOf('app.post("/api/:instance/send"'));
+const sendFn = send.slice(0, send.indexOf('\napp.'));
+assert.match(sendFn, /getNumberId/, 'send endpoint must resolve raw numbers to real jids');
+
 console.log('payments webhook contract OK');

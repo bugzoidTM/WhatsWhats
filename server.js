@@ -1283,7 +1283,19 @@ app.post("/api/:instance/send", validateInstance, async (req, res) => {
   const { to, message } = req.body || {};
   if (!to || !message) return res.status(400).json({ error: "Campos 'to' e 'message' são obrigatórios." });
   try {
-    const chatId = to.includes("@") ? to : `${to}@s.whatsapp.net`;
+    // Número cru ou @c.us: resolve o jid real (getNumberId) — enviar @c.us
+    // cru falha com "No LID for user" em contas migradas para LID.
+    let chatId = String(to);
+    if (!chatId.includes("@") || chatId.endsWith("@c.us")) {
+      const numero = chatId.split("@")[0].replace(/\D/g, "");
+      chatId = `${numero}@c.us`;
+      try {
+        const numberId = await inst.whatsappClient.getNumberId(numero);
+        if (numberId?._serialized) chatId = numberId._serialized;
+      } catch (e) {
+        console.warn(`[${instance}] /send: não resolvi o jid de ${numero}, tentando ${chatId}:`, e.message);
+      }
+    }
     const sent = await sendAutomationMessage(instance, inst, chatId, message);
     // Registra no histórico da instância (dashboard/CRM enxergam o que as
     // integrações externas — ex.: n8n — respondem pelos clientes).
