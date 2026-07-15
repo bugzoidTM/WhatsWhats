@@ -56,7 +56,7 @@ services:
         max_attempts: 3
       resources:
         limits:
-          memory: 1024M
+          memory: 3072M
         reservations:
           memory: 256M
       labels:
