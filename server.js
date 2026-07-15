@@ -2133,7 +2133,7 @@ function scheduleBufferedResponse(instanceName, msg, chat, texto) {
     pendingResponses.delete(key);
     processBufferedCustomerText(item).catch((e) => {
       console.error(`[${instanceName}] Erro ao processar buffer de mensagem:`, e);
-      try { replyWithAutomation(instanceName, item.msg, "Ocorreu um erro. Tente novamente em instantes."); } catch (_) {}
+      // Não responder erro ao cliente: só loga (evita spam de "Ocorreu um erro").
     });
   }, delayMs);
   pendingResponses.set(key, item);
@@ -2450,12 +2450,21 @@ async function handleMessage(instanceName, msg) {
   try {
     const inst = getOrCreateInstance(instanceName);
     if (!msg.from || msg.from.endsWith("@g.us")) return;
-    const chat = await msg.getChat();
-    if (chat.isGroup) return;
+    // getChat() da whatsapp-web.js falha de forma intermitente contra a estrutura
+    // interna atual do WhatsApp Web (ex.: contatos @lid). Não pode derrubar o
+    // processamento nem gerar resposta de erro ao cliente — segue sem chat.
+    let chat = null;
+    try {
+      chat = await msg.getChat();
+    } catch (e) {
+      console.warn(`[${instanceName}] getChat falhou (${msg.from}); seguindo sem chat:`, e.message);
+    }
+    if (chat && chat.isGroup) return;
 
     // Mídias e arquivos não devem cair no fluxo textual/IA comum: encaminha para análise humana.
     if (msg.hasMedia) {
-      await handleCustomerMedia(instanceName, inst, msg, chat);
+      if (chat) await handleCustomerMedia(instanceName, inst, msg, chat);
+      else console.warn(`[${instanceName}] mídia de ${msg.from} ignorada: getChat indisponível`);
       return;
     }
 
@@ -2474,10 +2483,11 @@ async function handleMessage(instanceName, msg) {
     saveMessageEvent(instanceName, incomingPayload);
 
     if (inst.config.humanoAtendeu || isAutomationPausedForCustomer(instanceName, msg.from)) return;
-    scheduleBufferedResponse(instanceName, msg, chat, texto);
+    if (chat) scheduleBufferedResponse(instanceName, msg, chat, texto);
   } catch (e) {
     console.error(`[${instanceName}] Erro ao processar mensagem:`, e);
-    try { await replyWithAutomation(instanceName, msg, "Ocorreu um erro. Tente novamente em instantes."); } catch (_) {}
+    // Não responder erro ao cliente: é UX ruim, mascara falha interna e gera
+    // envios automáticos desnecessários. Só loga.
   }
 }
 
